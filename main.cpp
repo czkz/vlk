@@ -694,20 +694,20 @@ int main() {
     //     return ret;
     // };
 
-    const auto createVertexBuffer = [
+    const auto createDeviceLocalBuffer = [
         &device,
         &createBuffer,
         &commandPoolUtil,
         graphicsQueue
-    ](std::span<const std::byte> data) {
+    ](vk::BufferUsageFlags usage, std::span<const std::byte> data) {
         auto stagingBuffer = createBuffer(
             data.size(),
             vk::BufferUsageFlagBits::eTransferSrc,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
         );
-        auto vertexBuffer = createBuffer(
+        auto localBuffer = createBuffer(
             data.size(),
-            vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer,
+            vk::BufferUsageFlagBits::eTransferDst | usage,
             vk::MemoryPropertyFlagBits::eDeviceLocal
         );
 
@@ -747,23 +747,30 @@ int main() {
             }, nullptr);
             queue.waitIdle();
         };
-        copyBuffer(stagingBuffer.first, vertexBuffer.first, data.size());
+        copyBuffer(stagingBuffer.first, localBuffer.first, data.size());
 
-        return vertexBuffer;
+        return localBuffer;
     };
 
     constexpr auto vertices = std::to_array<Vertex>({
-        {{ 0.0f, -0.5f}, {1.0f, 1.0f, 0.0f}},
-        {{ 0.5f,  0.5f}, {0.0f, 1.0f, 1.0f}},
-        {{-0.5f,  0.5f}, {1.0f, 0.0f, 1.0f}},
+        {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+        {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+        {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+        {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
     });
-    const auto [vertexBuffer, vertexBufferMemory] = createVertexBuffer(std::as_bytes(std::span(vertices)));
+    constexpr auto indices = std::to_array<uint16_t>({
+        0, 1, 2,
+        2, 3, 0
+    });
+    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBuffer(vk::BufferUsageFlagBits::eVertexBuffer, std::as_bytes(std::span(vertices)));
+    const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBuffer(vk::BufferUsageFlagBits::eIndexBuffer, std::as_bytes(std::span(indices)));
 
     const auto recordCommandBuffer = [
         &renderPass,
         &graphicsPipeline,
-        &vertexBuffer = vertexBuffer,
-        nVertices = vertices.size(),
+        &vertexBuffer,
+        &indexBuffer,
+        nIndices = indices.size(),
         &imageExtent = swapchainInfo.imageExtent,
         &swapchainFramebuffers
     ](const vk::UniqueCommandBuffer& commandBuffer, uint32_t imageIndex) {
@@ -788,6 +795,7 @@ int main() {
         }, vk::SubpassContents::eInline);
         commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline.get());
         commandBuffer->bindVertexBuffers(0, {vertexBuffer.get()}, {0});
+        commandBuffer->bindIndexBuffer(indexBuffer.get(), 0, vk::IndexType::eUint16);
         commandBuffer->setViewport(0, vk::Viewport {
             .x = 0,
             .y = 0,
@@ -800,7 +808,7 @@ int main() {
             .offset = {0, 0},
             .extent = imageExtent,
         });
-        commandBuffer->draw(nVertices, 1, 0, 0);
+        commandBuffer->drawIndexed(nIndices, 1, 0, 0, 0);
         commandBuffer->endRenderPass();
         commandBuffer->end();
     };
