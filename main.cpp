@@ -384,7 +384,7 @@ int main() {
         };
         return createInfo;
     };
-    const auto createImageViews = [&device](const vk::SwapchainKHR& swapchain, vk::Format format) {
+    const auto createImageViewsUnique = [&device](const vk::SwapchainKHR& swapchain, vk::Format format) {
         std::vector<vk::UniqueImageView> ret;
         for (const auto& image : device->getSwapchainImagesKHR(swapchain)) {
             vk::ImageViewCreateInfo createInfo = {
@@ -410,7 +410,7 @@ int main() {
         }
         return ret;
     };
-    const auto createRenderPass = [&device](vk::Format format) {
+    const auto createRenderPassUnique = [&device](vk::Format format) {
         vk::AttachmentDescription colorAttachmentDesc = {
             .flags = {},
             .format = format,
@@ -458,7 +458,7 @@ int main() {
         };
         return device->createRenderPassUnique(createInfo);
     };
-    const auto createFramebuffers = [&device](std::span<const vk::UniqueImageView> imageViews, const vk::Extent2D& extent, const vk::RenderPass& renderPass) {
+    const auto createFramebuffersUnique = [&device](std::span<const vk::UniqueImageView> imageViews, const vk::Extent2D& extent, const vk::RenderPass& renderPass) {
         std::vector<vk::UniqueFramebuffer> ret;
         for (const auto& imageView : imageViews) {
             vk::FramebufferCreateInfo createInfo = {
@@ -474,7 +474,7 @@ int main() {
         }
         return ret;
     };
-    const auto createGraphicsPipeline = [&device, &bindingDescription, &attributeDescriptions](
+    const auto createGraphicsPipelineUnique = [&device, &bindingDescription, &attributeDescriptions](
         vk::PipelineLayout pipelineLayout,
         vk::RenderPass renderPass,
         vk::ShaderModule vertShaderModule,
@@ -613,7 +613,7 @@ int main() {
         return device->createPipelineLayoutUnique(createInfo);
     }();
 
-    const auto createShaderModule = [&device](std::string_view code) {
+    const auto createShaderModuleUnique = [&device](std::string_view code) {
         vk::ShaderModuleCreateInfo createInfo = {
             .flags = {},
             .codeSize = code.size(),
@@ -625,8 +625,8 @@ int main() {
         std::ifstream f(filename);
         return std::string(std::istreambuf_iterator<char>(f), {});
     };
-    const auto vertShader = createShaderModule(slurp("shaders/triangle.vert.spv"));
-    const auto fragShader = createShaderModule(slurp("shaders/triangle.frag.spv"));
+    const auto vertShader = createShaderModuleUnique(slurp("shaders/triangle.vert.spv"));
+    const auto fragShader = createShaderModuleUnique(slurp("shaders/triangle.frag.spv"));
 
     vk::SwapchainCreateInfoKHR         swapchainInfo;
     vk::UniqueSwapchainKHR             swapchain;
@@ -635,17 +635,17 @@ int main() {
     std::vector<vk::UniqueFramebuffer> swapchainFramebuffers;
     vk::UniquePipeline                 graphicsPipeline;
 
-    const auto recreateSwapchain = [&]() {
+    const auto recreateSwapchainUnique = [&]() {
         swapchainInfo         = pickSwapchainSettings(swapchain.get());
         swapchain             = device->createSwapchainKHRUnique(swapchainInfo);
-        swapchainImageViews   = createImageViews(swapchain.get(), swapchainInfo.imageFormat);
-        renderPass            = createRenderPass(swapchainInfo.imageFormat);
-        swapchainFramebuffers = createFramebuffers(swapchainImageViews, swapchainInfo.imageExtent, renderPass.get());
-        graphicsPipeline      = createGraphicsPipeline(pipelineLayout.get(), renderPass.get(), vertShader.get(), fragShader.get());
+        swapchainImageViews   = createImageViewsUnique(swapchain.get(), swapchainInfo.imageFormat);
+        renderPass            = createRenderPassUnique(swapchainInfo.imageFormat);
+        swapchainFramebuffers = createFramebuffersUnique(swapchainImageViews, swapchainInfo.imageExtent, renderPass.get());
+        graphicsPipeline      = createGraphicsPipelineUnique(pipelineLayout.get(), renderPass.get(), vertShader.get(), fragShader.get());
     };
-    recreateSwapchain();
+    recreateSwapchainUnique();
 
-    const auto createBuffer = [&physicalDevice, &device](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
+    const auto createBufferUnique = [&physicalDevice, &device](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
         // Create buffer
         vk::UniqueBuffer buffer = [&device, nBytes, usage] {
             vk::BufferCreateInfo createInfo = {
@@ -696,8 +696,8 @@ int main() {
         device->unmapMemory(memory.get());
     };
 
-    // const auto createFilledBuffer = [&device, &createBuffer, &fillBuffer](vk::BufferUsageFlags usage, std::span<const std::byte> data) {
-    //     auto ret = createBuffer(
+    // const auto createFilledBufferUnique = [&createBufferUnique, &fillBuffer](vk::BufferUsageFlags usage, std::span<const std::byte> data) {
+    //     auto ret = createBufferUnique(
     //         data.size(),
     //         usage,
     //         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
@@ -747,17 +747,17 @@ int main() {
         queue.waitIdle();
     };
 
-    const auto createDeviceLocalBuffer = [
-        &createBuffer,
+    const auto createDeviceLocalBufferUnique = [
+        &createBufferUnique,
         &fillBuffer,
         &copyBuffer
     ](vk::BufferUsageFlags usage, std::span<const std::byte> data) {
-        auto stagingBuffer = createBuffer(
+        auto stagingBuffer = createBufferUnique(
             data.size(),
             vk::BufferUsageFlagBits::eTransferSrc,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
         );
-        auto localBuffer = createBuffer(
+        auto localBuffer = createBufferUnique(
             data.size(),
             vk::BufferUsageFlagBits::eTransferDst | usage,
             vk::MemoryPropertyFlagBits::eDeviceLocal
@@ -779,8 +779,8 @@ int main() {
     //     0, 1, 2,
     //     2, 3, 0
     // });
-    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBuffer(vk::BufferUsageFlagBits::eVertexBuffer, std::as_bytes(std::span(vertices)));
-    // const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBuffer(vk::BufferUsageFlagBits::eIndexBuffer, std::as_bytes(std::span(indices)));
+    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, std::as_bytes(std::span(vertices)));
+    // const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, std::as_bytes(std::span(indices)));
 
     // Create command pool
     const auto commandPool = device->createCommandPoolUnique({
@@ -825,7 +825,7 @@ int main() {
         f.inFlightFence = device->createFenceUnique({
             .flags = vk::FenceCreateFlagBits::eSignaled,
         });
-        f.uniformBuffer = createBuffer(sizeof(UniformBuffer), vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+        f.uniformBuffer = createBufferUnique(sizeof(UniformBuffer), vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
         f.uniformBufferMapping = nullptr;
         f.descriptorSet = std::move(device->allocateDescriptorSetsUnique({
             .descriptorPool = descriptorPool.get(),
@@ -978,7 +978,7 @@ int main() {
     };
 
     // Main loop
-    [&window, &drawFrame, &framebufferResized, &device, &recreateSwapchain] {
+    [&window, &drawFrame, &framebufferResized, &device, &recreateSwapchainUnique] {
         FrameCounter frameCounter;
         Stopwatch benchStopwatch;
         while (!glfwWindowShouldClose(window.get())) {
@@ -1003,7 +1003,7 @@ int main() {
                     }
                 }
                 device->waitIdle();
-                recreateSwapchain();
+                recreateSwapchainUnique();
                 framebufferResized = false;
             }
         }
