@@ -691,9 +691,9 @@ int main() {
     };
 
     const auto fillBuffer = [&device](const vk::UniqueDeviceMemory& memory, const auto& data) {
-        const auto bytes = std::as_bytes(std::span(data));
-        void* mapped = device->mapMemory(memory.get(), 0, bytes.size(), {});
-        memcpy(mapped, bytes.data(), bytes.size());
+        std::span bytes = data;
+        void* mapped = device->mapMemory(memory.get(), 0, bytes.size_bytes(), {});
+        memcpy(mapped, bytes.data(), bytes.size_bytes());
         device->unmapMemory(memory.get());
     };
 
@@ -707,17 +707,46 @@ int main() {
         return ret;
     };
 
-    // Create a utility command pool
-    const vk::UniqueCommandPool commandPoolUtil = [&device, &graphicsQueueFamily] {
-        vk::CommandPoolCreateInfo createInfo = {
+    const auto tempCommandBuffer = [
+        &device,
+        &queue = graphicsQueue,
+        commandPoolUtil = device->createCommandPoolUnique({
             .flags = vk::CommandPoolCreateFlagBits::eTransient,
             .queueFamilyIndex = graphicsQueueFamily,
+        })
+    ]() {
+        class TempCommandBuffer {
+            vk::UniqueCommandBuffer commandBuffer;
+            vk::Queue queue;
+            bool done = false;
+            TempCommandBuffer(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue)
+                : commandBuffer(std::move(commandBuffer)), queue(std::move(queue)) {}
+        public:
+            TempCommandBuffer(TempCommandBuffer&& o)
+                : commandBuffer(std::move(o.commandBuffer)), queue(std::move(o.queue)) { o.done = true; }
+            operator const vk::UniqueCommandBuffer&() const { return commandBuffer; }
+            const vk::UniqueCommandBuffer& operator->() const { return commandBuffer; }
+            void end() {
+                if (done) { return; }
+                done = true;
+                commandBuffer->end();
+                queue.submit(vk::SubmitInfo {
+                    .waitSemaphoreCount = 0,
+                    .pWaitSemaphores = nullptr,
+                    .pWaitDstStageMask = nullptr,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &commandBuffer.get(),
+                    .signalSemaphoreCount = 0,
+                    .pSignalSemaphores = nullptr,
+                }, nullptr);
+                queue.waitIdle();
+            }
+            ~TempCommandBuffer() { end(); }
+            static TempCommandBuffer make(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue) {
+                return TempCommandBuffer{std::move(commandBuffer), std::move(queue)};
+            }
         };
-        return device->createCommandPoolUnique(createInfo);
-    }();
-
-    const auto oneTimeCommands = [&device, &commandPoolUtil, &queue = graphicsQueue](const auto& cmds) {
-        const auto commandBuffer = std::move(device->allocateCommandBuffersUnique({
+        auto commandBuffer = std::move(device->allocateCommandBuffersUnique({
             .commandPool = commandPoolUtil.get(),
             .level = vk::CommandBufferLevel::ePrimary,
             .commandBufferCount = 1,
@@ -726,65 +755,53 @@ int main() {
             .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
             .pInheritanceInfo = 0,
         });
-        cmds(commandBuffer);
-        commandBuffer->end();
-        queue.submit(vk::SubmitInfo {
-            .waitSemaphoreCount = 0,
-            .pWaitSemaphores = nullptr,
-            .pWaitDstStageMask = nullptr,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer.get(),
-            .signalSemaphoreCount = 0,
-            .pSignalSemaphores = nullptr,
-        }, nullptr);
-        queue.waitIdle();
+        return TempCommandBuffer::make(std::move(commandBuffer), queue);
     };
 
-    const auto copyBuffer = [&oneTimeCommands](
+    const auto cmdCopyBuffer = [](
+        const vk::UniqueCommandBuffer& commandBuffer,
         const vk::UniqueBuffer& src,
         const vk::UniqueBuffer& dst,
         const vk::DeviceSize& size
     ) {
-        oneTimeCommands([&](const vk::UniqueCommandBuffer& commandBuffer) {
-            commandBuffer->copyBuffer(src.get(), dst.get(), vk::BufferCopy {
-                .srcOffset = 0,
-                .dstOffset = 0,
-                .size = size,
-            });
+        commandBuffer->copyBuffer(src.get(), dst.get(), vk::BufferCopy {
+            .srcOffset = 0,
+            .dstOffset = 0,
+            .size = size,
         });
     };
 
-    const auto copyBufferToImage = [&oneTimeCommands](
+    const auto cmdCopyBufferToImage = [](
+        const vk::UniqueCommandBuffer& commandBuffer,
         const vk::UniqueBuffer& src,
         const vk::UniqueImage& dst,
         size_t w,
         size_t h
     ) {
-        oneTimeCommands([&](const vk::UniqueCommandBuffer& commandBuffer) {
-            commandBuffer->copyBufferToImage(src.get(), dst.get(), vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy {
-                .bufferOffset = 0,
-                .bufferRowLength = 0,
-                .bufferImageHeight = 0,
-                .imageSubresource = {
-                    .aspectMask = vk::ImageAspectFlagBits::eColor,
-                    .mipLevel = 0,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-                .imageOffset = {0, 0, 0},
-                .imageExtent = {
-                    .width = (uint32_t) w,
-                    .height = (uint32_t) h,
-                    .depth = 1,
-                },
-            });
+        commandBuffer->copyBufferToImage(src.get(), dst.get(), vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {
+                .width = (uint32_t) w,
+                .height = (uint32_t) h,
+                .depth = 1,
+            },
         });
     };
 
     const auto createDeviceLocalBufferUnique = [
         &createBufferUnique,
         &createStagingBufferUnique,
-        &copyBuffer
+        &cmdCopyBuffer,
+        &tempCommandBuffer
     ](vk::BufferUsageFlags usage, const auto& data) {
         const auto bytes = std::as_bytes(std::span(data));
         auto stagingBuffer = createStagingBufferUnique(bytes);
@@ -793,8 +810,114 @@ int main() {
             vk::BufferUsageFlagBits::eTransferDst | usage,
             vk::MemoryPropertyFlagBits::eDeviceLocal
         );
-        copyBuffer(stagingBuffer.first, localBuffer.first, bytes.size());
+        cmdCopyBuffer(tempCommandBuffer(), stagingBuffer.first, localBuffer.first, bytes.size());
         return localBuffer;
+    };
+
+    const auto createDeviceLocalImageUnique = [
+        &device,
+        &createStagingBufferUnique,
+        &findMemoryType,
+        &tempCommandBuffer,
+        &cmdCopyBufferToImage
+    ](
+        const auto& imageData,
+        size_t w,
+        size_t h,
+        const vk::Format& format
+    ) {
+        const auto stagingBuffer = createStagingBufferUnique(imageData);
+        auto localImage = [&device, &findMemoryType, &w, &h, &format] {
+            auto image = device->createImageUnique({
+                .flags = {},
+                .imageType = vk::ImageType::e2D,
+                .format = format,
+                .extent = vk::Extent3D {
+                    .width = (uint32_t) w,
+                    .height = (uint32_t) h,
+                    .depth = 1,
+                },
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                .sharingMode = vk::SharingMode::eExclusive,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr, // For shared sharingMode
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            auto memoryRequirements = device->getImageMemoryRequirements(image.get());
+            vk::MemoryAllocateInfo allocInfo = {
+                .allocationSize = memoryRequirements.size,
+                .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal),
+            };
+            vk::UniqueDeviceMemory memory = device->allocateMemoryUnique(allocInfo);
+            device->bindImageMemory(image.get(), memory.get(), 0);
+            return std::pair(std::move(image), std::move(memory));
+        }();
+        auto commandBuffer = tempCommandBuffer();
+        commandBuffer->pipelineBarrier(
+            vk::PipelineStageFlagBits::eTopOfPipe,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            nullptr,
+            nullptr,
+            vk::ImageMemoryBarrier {
+            .srcAccessMask = vk::AccessFlagBits::eNone,
+            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .image = localImage.first.get(),
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        cmdCopyBufferToImage(commandBuffer, stagingBuffer.first, localImage.first, w, h);
+        commandBuffer->pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eFragmentShader,
+            {},
+            nullptr,
+            nullptr,
+            vk::ImageMemoryBarrier {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .image = localImage.first.get(),
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        commandBuffer.end();
+        return localImage;
+    };
+
+    const auto createDeviceLocalTextureUnique = [&createDeviceLocalImageUnique](std::string_view path) {
+        const auto img = load_image(path);
+        const vk::Format format = [&c = img.channels] {
+            switch (c) {
+                case 1: return vk::Format::eR8Srgb;
+                case 2: return vk::Format::eR8G8Srgb;
+                case 3: return vk::Format::eR8G8B8Srgb;
+                case 4: return vk::Format::eR8G8B8A8Srgb;
+                default: throw ex::runtime("unknown image format");
+            }
+        }();
+        return createDeviceLocalImageUnique(img, img.w, img.h, format);
     };
 
     const auto cubeMesh = primitives::generate_cube(1);
@@ -812,99 +935,7 @@ int main() {
     const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
     // const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
 
-    auto img = load_image("textures/bricks.png");
-    const auto stagingBuffer = createStagingBufferUnique(img);
-    const auto textureImage = [&device, &findMemoryType, &img] {
-        const vk::Format format = [c = img.channels] {
-            switch (c) {
-                case 1: return vk::Format::eR8Srgb;
-                case 2: return vk::Format::eR8G8Srgb;
-                case 3: return vk::Format::eR8G8B8Srgb;
-                case 4: return vk::Format::eR8G8B8A8Srgb;
-                default: throw ex::runtime("unknown image format");
-            }
-        }();
-        auto image = device->createImageUnique({
-            .flags = {},
-            .imageType = vk::ImageType::e2D,
-            .format = format,
-            .extent = vk::Extent3D {
-                .width = (uint32_t) img.w,
-                .height = (uint32_t) img.h,
-                .depth = 1,
-            },
-            .mipLevels = 1,
-            .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
-            .tiling = vk::ImageTiling::eOptimal,
-            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
-            .sharingMode = vk::SharingMode::eExclusive,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices = nullptr, // For shared sharingMode
-            .initialLayout = vk::ImageLayout::eUndefined,
-        });
-        auto memoryRequirements = device->getImageMemoryRequirements(image.get());
-        vk::MemoryAllocateInfo allocInfo = {
-            .allocationSize = memoryRequirements.size,
-            .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal),
-        };
-        vk::UniqueDeviceMemory memory = device->allocateMemoryUnique(allocInfo);
-        device->bindImageMemory(image.get(), memory.get(), 0);
-        return std::pair(std::move(image), std::move(memory));
-    }();
-    oneTimeCommands([&](const vk::UniqueCommandBuffer& commandBuffer) {
-        vk::ImageMemoryBarrier barrier = {
-            .srcAccessMask = vk::AccessFlagBits::eNone,
-            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .oldLayout = vk::ImageLayout::eUndefined,
-            .newLayout = vk::ImageLayout::eTransferDstOptimal,
-            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .image = textureImage.first.get(),
-            .subresourceRange = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-        commandBuffer->pipelineBarrier(
-            vk::PipelineStageFlagBits::eTopOfPipe,
-            vk::PipelineStageFlagBits::eTransfer,
-            {},
-            nullptr,
-            nullptr,
-            barrier
-        );
-    });
-    copyBufferToImage(stagingBuffer.first, textureImage.first, img.w, img.h);
-    oneTimeCommands([&](const vk::UniqueCommandBuffer& commandBuffer) {
-        vk::ImageMemoryBarrier barrier = {
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .image = textureImage.first.get(),
-            .subresourceRange = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        };
-        commandBuffer->pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eFragmentShader,
-            {},
-            nullptr,
-            nullptr,
-            barrier
-        );
-    });
+    const auto imageTexture = createDeviceLocalTextureUnique("textures/bricks.png");
 
     // Create command pool
     const auto commandPool = device->createCommandPoolUnique({
