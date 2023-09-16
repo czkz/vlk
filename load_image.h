@@ -20,11 +20,11 @@ public:
 	size_t size() const { return w*h*channels; }
 };
 
-inline stb_image load_image(std::string_view path) {
+inline stb_image load_image(std::string_view path, uint8_t force_channels = 0) {
     int w, h, channels;
-    stbi_uc* pixels = stbi_load(std::string(path).c_str(), &w, &h, &channels, STBI_rgb_alpha);
+    stbi_uc* pixels = stbi_load(std::string(path).c_str(), &w, &h, &channels, force_channels);
     if (!pixels) {
         throw std::runtime_error("failed to load image");
     }
-    return stb_image(std::move(pixels), w, h, channels);
+    return stb_image(std::move(pixels), w, h, force_channels ? force_channels : channels);
 }
