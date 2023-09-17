@@ -272,6 +272,268 @@ int main() {
     const vk::Queue graphicsQueue = device->getQueue(graphicsQueueFamily, 0);
     const vk::Queue presentQueue = device->getQueue(presentQueueFamily, 0);
 
+
+    const auto findMemoryType = [&physicalDevice](uint32_t typeFilter, vk::MemoryPropertyFlags requiredProperties) {
+        const auto memoryProperties = physicalDevice.getMemoryProperties();
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+            if (
+                (typeFilter & (1 << i)) &&
+                (memoryProperties.memoryTypes[i].propertyFlags & requiredProperties) == requiredProperties
+            ) {
+                return i;
+            }
+        }
+        throw ex::runtime("Couldn't find suitable memory type");
+    };
+    const auto createBufferUnique = [&device, &findMemoryType](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
+        // Create buffer
+        vk::UniqueBuffer buffer = [&device, nBytes, usage] {
+            vk::BufferCreateInfo createInfo = {
+                .flags = {},
+                .size = nBytes,
+                .usage = usage,
+                .sharingMode = vk::SharingMode::eExclusive,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+            };
+            return device->createBufferUnique(createInfo);
+        }();
+
+        // Allocate memory for the buffer
+        vk::UniqueDeviceMemory deviceMemory = [&device, &buffer, &properties, &findMemoryType] {
+            auto memoryRequirements = device->getBufferMemoryRequirements(buffer.get());
+            vk::MemoryAllocateInfo allocInfo = {
+                .allocationSize = memoryRequirements.size,
+                .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties),
+            };
+            vk::UniqueDeviceMemory ret = device->allocateMemoryUnique(allocInfo);
+            device->bindBufferMemory(buffer.get(), ret.get(), 0);
+            return ret;
+        }();
+        return std::pair {
+            std::move(buffer),
+            std::move(deviceMemory)
+        };
+    };
+    const auto createImageUnique = [&device, &findMemoryType](const vk::ImageCreateInfo& createInfo, const vk::MemoryPropertyFlags& memoryProperties) {
+        auto image = device->createImageUnique(createInfo);
+        auto memoryRequirements = device->getImageMemoryRequirements(image.get());
+        vk::MemoryAllocateInfo allocInfo = {
+            .allocationSize = memoryRequirements.size,
+            .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, memoryProperties),
+        };
+        vk::UniqueDeviceMemory memory = device->allocateMemoryUnique(allocInfo);
+        device->bindImageMemory(image.get(), memory.get(), 0);
+        return std::pair(std::move(image), std::move(memory));
+    };
+    const auto fillBuffer = [&device](const vk::UniqueDeviceMemory& memory, const auto& data) {
+        std::span bytes = data;
+        void* mapped = device->mapMemory(memory.get(), 0, bytes.size_bytes(), {});
+        memcpy(mapped, bytes.data(), bytes.size_bytes());
+        device->unmapMemory(memory.get());
+    };
+    const auto createStagingBufferUnique = [&createBufferUnique, &fillBuffer](const auto& data) {
+        auto ret = createBufferUnique(
+            std::span(data).size_bytes(),
+            vk::BufferUsageFlagBits::eTransferSrc,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
+        );
+        fillBuffer(ret.second, data);
+        return ret;
+    };
+    const auto tempCommandBuffer = [
+        &device,
+        &queue = graphicsQueue,
+        commandPoolUtil = device->createCommandPoolUnique({
+            .flags = vk::CommandPoolCreateFlagBits::eTransient,
+            .queueFamilyIndex = graphicsQueueFamily,
+        })
+    ]() {
+        class TempCommandBuffer {
+            vk::UniqueCommandBuffer commandBuffer;
+            vk::Queue queue;
+            bool done = false;
+            TempCommandBuffer(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue)
+                : commandBuffer(std::move(commandBuffer)), queue(std::move(queue)) {}
+        public:
+            TempCommandBuffer(TempCommandBuffer&& o)
+                : commandBuffer(std::move(o.commandBuffer)), queue(std::move(o.queue)) { o.done = true; }
+            operator const vk::UniqueCommandBuffer&() const { return commandBuffer; }
+            const vk::UniqueCommandBuffer& operator->() const { return commandBuffer; }
+            void end() {
+                if (done) { return; }
+                done = true;
+                commandBuffer->end();
+                queue.submit(vk::SubmitInfo {
+                    .waitSemaphoreCount = 0,
+                    .pWaitSemaphores = nullptr,
+                    .pWaitDstStageMask = nullptr,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &commandBuffer.get(),
+                    .signalSemaphoreCount = 0,
+                    .pSignalSemaphores = nullptr,
+                }, nullptr);
+                queue.waitIdle();
+            }
+            ~TempCommandBuffer() { end(); }
+            static TempCommandBuffer make(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue) {
+                return TempCommandBuffer{std::move(commandBuffer), std::move(queue)};
+            }
+        };
+        auto commandBuffer = std::move(device->allocateCommandBuffersUnique({
+            .commandPool = commandPoolUtil.get(),
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1,
+        })[0]);
+        commandBuffer->begin({
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+            .pInheritanceInfo = 0,
+        });
+        return TempCommandBuffer::make(std::move(commandBuffer), queue);
+    };
+    const auto cmdCopyBuffer = [](
+        const vk::UniqueCommandBuffer& commandBuffer,
+        const vk::UniqueBuffer& src,
+        const vk::UniqueBuffer& dst,
+        const vk::DeviceSize& size
+    ) {
+        commandBuffer->copyBuffer(src.get(), dst.get(), vk::BufferCopy {
+            .srcOffset = 0,
+            .dstOffset = 0,
+            .size = size,
+        });
+    };
+    const auto cmdCopyBufferToImage = [](
+        const vk::UniqueCommandBuffer& commandBuffer,
+        const vk::UniqueBuffer& src,
+        const vk::UniqueImage& dst,
+        size_t w,
+        size_t h
+    ) {
+        commandBuffer->copyBufferToImage(src.get(), dst.get(), vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {
+                .width = (uint32_t) w,
+                .height = (uint32_t) h,
+                .depth = 1,
+            },
+        });
+    };
+    const auto createDeviceLocalBufferUnique = [
+        &createBufferUnique,
+        &createStagingBufferUnique,
+        &cmdCopyBuffer,
+        &tempCommandBuffer
+    ](vk::BufferUsageFlags usage, const auto& data) {
+        const auto bytes = std::as_bytes(std::span(data));
+        auto stagingBuffer = createStagingBufferUnique(bytes);
+        auto localBuffer = createBufferUnique(
+            bytes.size(),
+            vk::BufferUsageFlagBits::eTransferDst | usage,
+            vk::MemoryPropertyFlagBits::eDeviceLocal
+        );
+        cmdCopyBuffer(tempCommandBuffer(), stagingBuffer.first, localBuffer.first, bytes.size());
+        return localBuffer;
+    };
+    const auto createDeviceLocalImageUnique = [
+        &createStagingBufferUnique,
+        &createImageUnique,
+        &tempCommandBuffer,
+        &cmdCopyBufferToImage
+    ](const auto& imageData, size_t w, size_t h, const vk::Format& format) {
+        const auto stagingBuffer = createStagingBufferUnique(imageData);
+        auto localImage = createImageUnique({
+            .flags = {},
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = vk::Extent3D {
+                .width = (uint32_t) w,
+                .height = (uint32_t) h,
+                .depth = 1,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr, // For shared sharingMode
+            .initialLayout = vk::ImageLayout::eUndefined,
+        }, vk::MemoryPropertyFlagBits::eDeviceLocal);
+        auto commandBuffer = tempCommandBuffer();
+        commandBuffer->pipelineBarrier(
+            vk::PipelineStageFlagBits::eTopOfPipe,
+            vk::PipelineStageFlagBits::eTransfer,
+            {},
+            nullptr,
+            nullptr,
+            vk::ImageMemoryBarrier {
+            .srcAccessMask = vk::AccessFlagBits::eNone,
+            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .image = localImage.first.get(),
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        cmdCopyBufferToImage(commandBuffer, stagingBuffer.first, localImage.first, w, h);
+        commandBuffer->pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eFragmentShader,
+            {},
+            nullptr,
+            nullptr,
+            vk::ImageMemoryBarrier {
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
+            .image = localImage.first.get(),
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        commandBuffer.end();
+        return localImage;
+    };
+    const auto createDeviceLocalTextureUnique = [&createDeviceLocalImageUnique](std::string_view path, vk::Format format) {
+        const int channels = [&format] {
+            switch (format) {
+                case vk::Format::eR8Srgb:       return 1;
+                case vk::Format::eR8G8Srgb:     return 2;
+                case vk::Format::eR8G8B8Srgb:   return 3;
+                case vk::Format::eR8G8B8A8Srgb: return 4;
+                default: throw ex::runtime("unsupported image format");
+            }
+        }();
+        const auto img = load_image(path, channels);
+        return createDeviceLocalImageUnique(img, img.w, img.h, format);
+    };
+
+
     struct Vertex {
         Vector3 pos;
         Vector2 uv;
@@ -388,20 +650,15 @@ int main() {
         };
         return createInfo;
     };
-    const auto createImageViewsUnique = [&device](const vk::SwapchainKHR& swapchain, vk::Format format) {
+    const auto createSwapchainImageViewsUnique = [&device](const vk::SwapchainKHR& swapchain, vk::Format format) {
         std::vector<vk::UniqueImageView> ret;
         for (const auto& image : device->getSwapchainImagesKHR(swapchain)) {
-            vk::ImageViewCreateInfo createInfo = {
+            ret.push_back(device->createImageViewUnique({
                 .flags = {},
                 .image = image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = format,
-                .components = {
-                    .r = vk::ComponentSwizzle::eIdentity,
-                    .g = vk::ComponentSwizzle::eIdentity,
-                    .b = vk::ComponentSwizzle::eIdentity,
-                    .a = vk::ComponentSwizzle::eIdentity,
-                },
+                .components = {},
                 .subresourceRange = {
                     .aspectMask = vk::ImageAspectFlagBits::eColor,
                     .baseMipLevel = 0,
@@ -409,10 +666,54 @@ int main() {
                     .baseArrayLayer = 0,
                     .layerCount = 1,
                 },
-            };
-            ret.push_back(device->createImageViewUnique(createInfo));
+            }));
         }
         return ret;
+    };
+    struct DepthAttachment {
+        vk::UniqueImage image;
+        vk::UniqueDeviceMemory deviceMemory;
+        vk::UniqueImageView imageView;
+    };
+    const auto createDepthAttachmentUnique = [&device, &createImageUnique](vk::Extent2D extent) {
+        auto depthImage = createImageUnique({
+            .flags = {},
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eD32Sfloat,
+            .extent = {
+                .width = extent.width,
+                .height = extent.height,
+                .depth = 1,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr, // For shared sharingMode
+            .initialLayout = vk::ImageLayout::eUndefined,
+        }, vk::MemoryPropertyFlagBits::eDeviceLocal);
+        auto depthImageView = device->createImageViewUnique({
+            .flags = {},
+            .image = depthImage.first.get(),
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eD32Sfloat,
+            .components = {},
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eDepth,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        return DepthAttachment {
+            .image        = std::move(depthImage.first),
+            .deviceMemory = std::move(depthImage.second),
+            .imageView    = std::move(depthImageView),
+        };
     };
     const auto createRenderPassUnique = [&device](vk::Format format) {
         vk::AttachmentDescription colorAttachmentDesc = {
@@ -426,9 +727,24 @@ int main() {
             .initialLayout = vk::ImageLayout::eUndefined,
             .finalLayout = vk::ImageLayout::ePresentSrcKHR,
         };
+        vk::AttachmentDescription depthAttachmentDesc = {
+            .flags = {},
+            .format = vk::Format::eD32Sfloat,
+            .samples = vk::SampleCountFlagBits::e1,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eDontCare,
+            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+            .initialLayout = vk::ImageLayout::eUndefined,
+            .finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+        };
         vk::AttachmentReference colorAttachmentRef = {
             .attachment = 0,
             .layout = vk::ImageLayout::eColorAttachmentOptimal,
+        };
+        vk::AttachmentReference depthAttachmentRef = {
+            .attachment = 1,
+            .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
         };
         vk::SubpassDescription subpass = {
             .flags = {},
@@ -438,23 +754,24 @@ int main() {
             .colorAttachmentCount = 1,
             .pColorAttachments = &colorAttachmentRef,
             .pResolveAttachments = nullptr,
-            .pDepthStencilAttachment = nullptr,
+            .pDepthStencilAttachment = &depthAttachmentRef,
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = nullptr,
         };
         vk::SubpassDependency extenralDependency = {
             .srcSubpass = VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
-            .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
-            .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
+            .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
             .srcAccessMask = vk::AccessFlagBits::eNone,
-            .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+            .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
             .dependencyFlags = {},
         };
+        const auto attachmentDescriptions = std::to_array({colorAttachmentDesc, depthAttachmentDesc});
         vk::RenderPassCreateInfo createInfo = {
             .flags = {},
-            .attachmentCount = 1,
-            .pAttachments = &colorAttachmentDesc,
+            .attachmentCount = attachmentDescriptions.size(),
+            .pAttachments = attachmentDescriptions.data(),
             .subpassCount = 1,
             .pSubpasses = &subpass,
             .dependencyCount = 1,
@@ -462,19 +779,27 @@ int main() {
         };
         return device->createRenderPassUnique(createInfo);
     };
-    const auto createFramebuffersUnique = [&device](std::span<const vk::UniqueImageView> imageViews, const vk::Extent2D& extent, const vk::RenderPass& renderPass) {
+    const auto createFramebuffersUnique = [&device](
+        std::span<const vk::UniqueImageView> colorImageViews,
+        const vk::UniqueImageView& depthImageView,
+        const vk::Extent2D& extent,
+        const vk::RenderPass& renderPass
+    ) {
         std::vector<vk::UniqueFramebuffer> ret;
-        for (const auto& imageView : imageViews) {
-            vk::FramebufferCreateInfo createInfo = {
+        for (const auto& imageView : colorImageViews) {
+            const auto attachments = std::to_array({
+                imageView.get(),
+                depthImageView.get(),
+            });
+            ret.push_back(device->createFramebufferUnique({
                 .flags = {},
                 .renderPass = renderPass,
-                .attachmentCount = 1,
-                .pAttachments = &imageView.get(),
+                .attachmentCount = attachments.size(),
+                .pAttachments = attachments.data(),
                 .width = extent.width,
                 .height = extent.height,
                 .layers = 1,
-            };
-            ret.push_back(device->createFramebufferUnique(createInfo));
+            }));
         }
         return ret;
     };
@@ -539,6 +864,18 @@ int main() {
             .alphaToCoverageEnable = VK_FALSE,
             .alphaToOneEnable = VK_FALSE,
         };
+        vk::PipelineDepthStencilStateCreateInfo depthStencilState = {
+            .flags = {},
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = VK_TRUE,
+            .depthCompareOp = vk::CompareOp::eLess,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable = VK_FALSE,
+            .front = {},
+            .back = {},
+            .minDepthBounds = 0.0f,
+            .maxDepthBounds = 1.0f,
+        };
         vk::PipelineColorBlendAttachmentState colorBlendAttachment = {
             .blendEnable = VK_FALSE,
             .srcColorBlendFactor = vk::BlendFactor::eOne,
@@ -576,7 +913,7 @@ int main() {
             .pViewportState = &viewportState,
             .pRasterizationState = &rasterizationState,
             .pMultisampleState = &multisampleState,
-            .pDepthStencilState = nullptr,
+            .pDepthStencilState = &depthStencilState,
             .pColorBlendState = &colorBlendState,
             .pDynamicState = &dynamicState,
             .layout = pipelineLayout,
@@ -615,16 +952,13 @@ int main() {
     });
 
     // Create pipeline layout
-    const auto pipelineLayout = [&device, &descriptorSetLayout] {
-        vk::PipelineLayoutCreateInfo createInfo = {
-            .flags = {},
-            .setLayoutCount = 1,
-            .pSetLayouts = &descriptorSetLayout.get(),
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges = nullptr,
-        };
-        return device->createPipelineLayoutUnique(createInfo);
-    }();
+    const auto pipelineLayout = device->createPipelineLayoutUnique({
+        .flags = {},
+        .setLayoutCount = 1,
+        .pSetLayouts = &descriptorSetLayout.get(),
+        .pushConstantRangeCount = 0,
+        .pPushConstantRanges = nullptr,
+    });
 
     const auto createShaderModuleUnique = [&device](std::string_view code) {
         vk::ShaderModuleCreateInfo createInfo = {
@@ -644,293 +978,22 @@ int main() {
     vk::SwapchainCreateInfoKHR         swapchainInfo;
     vk::UniqueSwapchainKHR             swapchain;
     std::vector<vk::UniqueImageView>   swapchainImageViews;
+    DepthAttachment                    swapchainDepthAttachment;
     vk::UniqueRenderPass               renderPass;
     std::vector<vk::UniqueFramebuffer> swapchainFramebuffers;
     vk::UniquePipeline                 graphicsPipeline;
 
     const auto recreateSwapchainUnique = [&]() {
-        swapchainInfo         = pickSwapchainSettings(swapchain.get());
-        swapchain             = device->createSwapchainKHRUnique(swapchainInfo);
-        swapchainImageViews   = createImageViewsUnique(swapchain.get(), swapchainInfo.imageFormat);
-        renderPass            = createRenderPassUnique(swapchainInfo.imageFormat);
-        swapchainFramebuffers = createFramebuffersUnique(swapchainImageViews, swapchainInfo.imageExtent, renderPass.get());
-        graphicsPipeline      = createGraphicsPipelineUnique(pipelineLayout.get(), renderPass.get(), vertShader.get(), fragShader.get());
+        swapchainInfo            = pickSwapchainSettings(swapchain.get());
+        swapchain                = device->createSwapchainKHRUnique(swapchainInfo);
+        swapchainImageViews      = createSwapchainImageViewsUnique(swapchain.get(), swapchainInfo.imageFormat);
+        swapchainDepthAttachment = createDepthAttachmentUnique(swapchainInfo.imageExtent);
+        renderPass               = createRenderPassUnique(swapchainInfo.imageFormat);
+        swapchainFramebuffers    = createFramebuffersUnique(swapchainImageViews, swapchainDepthAttachment.imageView, swapchainInfo.imageExtent, renderPass.get());
+        graphicsPipeline         = createGraphicsPipelineUnique(pipelineLayout.get(), renderPass.get(), vertShader.get(), fragShader.get());
     };
     recreateSwapchainUnique();
 
-    const auto findMemoryType = [&physicalDevice](uint32_t typeFilter, vk::MemoryPropertyFlags requiredProperties) {
-        const auto memoryProperties = physicalDevice.getMemoryProperties();
-        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
-            if (
-                (typeFilter & (1 << i)) &&
-                (memoryProperties.memoryTypes[i].propertyFlags & requiredProperties) == requiredProperties
-            ) {
-                return i;
-            }
-        }
-        throw ex::runtime("Couldn't find suitable memory type");
-    };
-
-    const auto createBufferUnique = [&device, &findMemoryType](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
-        // Create buffer
-        vk::UniqueBuffer buffer = [&device, nBytes, usage] {
-            vk::BufferCreateInfo createInfo = {
-                .flags = {},
-                .size = nBytes,
-                .usage = usage,
-                .sharingMode = vk::SharingMode::eExclusive,
-                .queueFamilyIndexCount = 0,
-                .pQueueFamilyIndices = nullptr,
-            };
-            return device->createBufferUnique(createInfo);
-        }();
-
-        // Allocate memory for the buffer
-        vk::UniqueDeviceMemory deviceMemory = [&device, &buffer, &properties, &findMemoryType] {
-            auto memoryRequirements = device->getBufferMemoryRequirements(buffer.get());
-            vk::MemoryAllocateInfo allocInfo = {
-                .allocationSize = memoryRequirements.size,
-                .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties),
-            };
-            vk::UniqueDeviceMemory ret = device->allocateMemoryUnique(allocInfo);
-            device->bindBufferMemory(buffer.get(), ret.get(), 0);
-            return ret;
-        }();
-        return std::pair {
-            std::move(buffer),
-            std::move(deviceMemory)
-        };
-    };
-
-    const auto fillBuffer = [&device](const vk::UniqueDeviceMemory& memory, const auto& data) {
-        std::span bytes = data;
-        void* mapped = device->mapMemory(memory.get(), 0, bytes.size_bytes(), {});
-        memcpy(mapped, bytes.data(), bytes.size_bytes());
-        device->unmapMemory(memory.get());
-    };
-
-    const auto createStagingBufferUnique = [&createBufferUnique, &fillBuffer](const auto& data) {
-        auto ret = createBufferUnique(
-            std::span(data).size_bytes(),
-            vk::BufferUsageFlagBits::eTransferSrc,
-            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
-        );
-        fillBuffer(ret.second, data);
-        return ret;
-    };
-
-    const auto tempCommandBuffer = [
-        &device,
-        &queue = graphicsQueue,
-        commandPoolUtil = device->createCommandPoolUnique({
-            .flags = vk::CommandPoolCreateFlagBits::eTransient,
-            .queueFamilyIndex = graphicsQueueFamily,
-        })
-    ]() {
-        class TempCommandBuffer {
-            vk::UniqueCommandBuffer commandBuffer;
-            vk::Queue queue;
-            bool done = false;
-            TempCommandBuffer(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue)
-                : commandBuffer(std::move(commandBuffer)), queue(std::move(queue)) {}
-        public:
-            TempCommandBuffer(TempCommandBuffer&& o)
-                : commandBuffer(std::move(o.commandBuffer)), queue(std::move(o.queue)) { o.done = true; }
-            operator const vk::UniqueCommandBuffer&() const { return commandBuffer; }
-            const vk::UniqueCommandBuffer& operator->() const { return commandBuffer; }
-            void end() {
-                if (done) { return; }
-                done = true;
-                commandBuffer->end();
-                queue.submit(vk::SubmitInfo {
-                    .waitSemaphoreCount = 0,
-                    .pWaitSemaphores = nullptr,
-                    .pWaitDstStageMask = nullptr,
-                    .commandBufferCount = 1,
-                    .pCommandBuffers = &commandBuffer.get(),
-                    .signalSemaphoreCount = 0,
-                    .pSignalSemaphores = nullptr,
-                }, nullptr);
-                queue.waitIdle();
-            }
-            ~TempCommandBuffer() { end(); }
-            static TempCommandBuffer make(vk::UniqueCommandBuffer commandBuffer, vk::Queue queue) {
-                return TempCommandBuffer{std::move(commandBuffer), std::move(queue)};
-            }
-        };
-        auto commandBuffer = std::move(device->allocateCommandBuffersUnique({
-            .commandPool = commandPoolUtil.get(),
-            .level = vk::CommandBufferLevel::ePrimary,
-            .commandBufferCount = 1,
-        })[0]);
-        commandBuffer->begin({
-            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
-            .pInheritanceInfo = 0,
-        });
-        return TempCommandBuffer::make(std::move(commandBuffer), queue);
-    };
-
-    const auto cmdCopyBuffer = [](
-        const vk::UniqueCommandBuffer& commandBuffer,
-        const vk::UniqueBuffer& src,
-        const vk::UniqueBuffer& dst,
-        const vk::DeviceSize& size
-    ) {
-        commandBuffer->copyBuffer(src.get(), dst.get(), vk::BufferCopy {
-            .srcOffset = 0,
-            .dstOffset = 0,
-            .size = size,
-        });
-    };
-
-    const auto cmdCopyBufferToImage = [](
-        const vk::UniqueCommandBuffer& commandBuffer,
-        const vk::UniqueBuffer& src,
-        const vk::UniqueImage& dst,
-        size_t w,
-        size_t h
-    ) {
-        commandBuffer->copyBufferToImage(src.get(), dst.get(), vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy {
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = {0, 0, 0},
-            .imageExtent = {
-                .width = (uint32_t) w,
-                .height = (uint32_t) h,
-                .depth = 1,
-            },
-        });
-    };
-
-    const auto createDeviceLocalBufferUnique = [
-        &createBufferUnique,
-        &createStagingBufferUnique,
-        &cmdCopyBuffer,
-        &tempCommandBuffer
-    ](vk::BufferUsageFlags usage, const auto& data) {
-        const auto bytes = std::as_bytes(std::span(data));
-        auto stagingBuffer = createStagingBufferUnique(bytes);
-        auto localBuffer = createBufferUnique(
-            bytes.size(),
-            vk::BufferUsageFlagBits::eTransferDst | usage,
-            vk::MemoryPropertyFlagBits::eDeviceLocal
-        );
-        cmdCopyBuffer(tempCommandBuffer(), stagingBuffer.first, localBuffer.first, bytes.size());
-        return localBuffer;
-    };
-
-    const auto createDeviceLocalImageUnique = [
-        &device,
-        &createStagingBufferUnique,
-        &findMemoryType,
-        &tempCommandBuffer,
-        &cmdCopyBufferToImage
-    ](
-        const auto& imageData,
-        size_t w,
-        size_t h,
-        const vk::Format& format
-    ) {
-        const auto stagingBuffer = createStagingBufferUnique(imageData);
-        auto localImage = [&device, &findMemoryType, &w, &h, &format] {
-            auto image = device->createImageUnique({
-                .flags = {},
-                .imageType = vk::ImageType::e2D,
-                .format = format,
-                .extent = vk::Extent3D {
-                    .width = (uint32_t) w,
-                    .height = (uint32_t) h,
-                    .depth = 1,
-                },
-                .mipLevels = 1,
-                .arrayLayers = 1,
-                .samples = vk::SampleCountFlagBits::e1,
-                .tiling = vk::ImageTiling::eOptimal,
-                .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
-                .sharingMode = vk::SharingMode::eExclusive,
-                .queueFamilyIndexCount = 0,
-                .pQueueFamilyIndices = nullptr, // For shared sharingMode
-                .initialLayout = vk::ImageLayout::eUndefined,
-            });
-            auto memoryRequirements = device->getImageMemoryRequirements(image.get());
-            vk::MemoryAllocateInfo allocInfo = {
-                .allocationSize = memoryRequirements.size,
-                .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal),
-            };
-            vk::UniqueDeviceMemory memory = device->allocateMemoryUnique(allocInfo);
-            device->bindImageMemory(image.get(), memory.get(), 0);
-            return std::pair(std::move(image), std::move(memory));
-        }();
-        auto commandBuffer = tempCommandBuffer();
-        commandBuffer->pipelineBarrier(
-            vk::PipelineStageFlagBits::eTopOfPipe,
-            vk::PipelineStageFlagBits::eTransfer,
-            {},
-            nullptr,
-            nullptr,
-            vk::ImageMemoryBarrier {
-            .srcAccessMask = vk::AccessFlagBits::eNone,
-            .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .oldLayout = vk::ImageLayout::eUndefined,
-            .newLayout = vk::ImageLayout::eTransferDstOptimal,
-            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .image = localImage.first.get(),
-            .subresourceRange = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        });
-        cmdCopyBufferToImage(commandBuffer, stagingBuffer.first, localImage.first, w, h);
-        commandBuffer->pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eFragmentShader,
-            {},
-            nullptr,
-            nullptr,
-            vk::ImageMemoryBarrier {
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            .srcQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .dstQueueFamilyIndex = vk::QueueFamilyIgnored,
-            .image = localImage.first.get(),
-            .subresourceRange = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        });
-        commandBuffer.end();
-        return localImage;
-    };
-
-    const auto createDeviceLocalTextureUnique = [&createDeviceLocalImageUnique](std::string_view path, vk::Format format) {
-        const int channels = [&format] {
-            switch (format) {
-                case vk::Format::eR8Srgb:       return 1;
-                case vk::Format::eR8G8Srgb:     return 2;
-                case vk::Format::eR8G8B8Srgb:   return 3;
-                case vk::Format::eR8G8B8A8Srgb: return 4;
-                default: throw ex::runtime("unsupported image format");
-            }
-        }();
-        const auto img = load_image(path, channels);
-        return createDeviceLocalImageUnique(img, img.w, img.h, format);
-    };
 
     const auto cubeMesh = primitives::generate_cube(1);
     const auto vertices = [&cubeMesh] {
@@ -1086,11 +1149,17 @@ int main() {
         &imageExtent = swapchainInfo.imageExtent,
         &swapchainFramebuffers
     ](const vk::UniqueCommandBuffer& commandBuffer, uint32_t imageIndex, const vk::UniqueDescriptorSet& descriptorSet) {
-        vk::ClearValue clearColor = {
-            .color = {
-                .float32 = std::to_array<float>({0, 0, 0, 1})
+        const auto clearColors = std::to_array<vk::ClearValue>({
+            {
+                .color = {
+                    .float32 = std::to_array<float>({0, 0, 0, 1})
+                },
+            }, {
+                .depthStencil = {
+                    .depth = 1.0f,
+                },
             },
-        };
+        });
         commandBuffer->begin({
             .flags = {},
             .pInheritanceInfo = nullptr,
@@ -1102,8 +1171,8 @@ int main() {
                 .offset = {0, 0},
                 .extent = imageExtent,
             },
-            .clearValueCount = 1,
-            .pClearValues = &clearColor,
+            .clearValueCount = clearColors.size(),
+            .pClearValues = clearColors.data(),
         }, vk::SubpassContents::eInline);
         commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline.get());
         commandBuffer->bindVertexBuffers(0, {vertexBuffer.get()}, {0});
@@ -1156,15 +1225,15 @@ int main() {
             Transform transform = {
                 .position = {0, 0, 0},
                 .rotation = Quaternion::Euler({time/3, time/2, time}),
-                .scale = Vector3(0.5),
+                .scale = Vector3(1.0),
             };
             SpaceCamera camera = {{
-                .position = {0, -1, 0},
+                .position = {0, -2, 0},
             }};
             Matrix4 model = transform.Matrix();
             Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
             float aspect = (float) swapchainInfo.imageExtent.width / swapchainInfo.imageExtent.height;
-            Matrix4 proj = Transform::PerspectiveProjection(90, aspect);
+            Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10});
             UniformBuffer ubo = {
                 .MVP = (proj * view * model).Transposed(),
             };

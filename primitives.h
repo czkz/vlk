@@ -170,7 +170,8 @@ namespace primitives {
         std::vector<Vector3> bitangents;
     };
 
-    inline mesh generate_cube(int subdivisions) {
+    // 1x1x1 cube
+    inline mesh generate_cube(int subdivisions = 1) {
         mesh ret;
         detail::generate_cube_pos(ret.pos, subdivisions);
         detail::generate_cube_normals(ret.normals, subdivisions);
@@ -179,7 +180,7 @@ namespace primitives {
         return ret;
     }
 
-    inline mesh generate_sphere(int subdivisions) {
+    inline mesh generate_sphere(int subdivisions = 1) {
         mesh ret;
         detail::generate_cube_pos(ret.pos, subdivisions);
         for (auto& v : ret.pos) {
