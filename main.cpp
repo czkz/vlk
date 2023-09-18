@@ -247,9 +247,9 @@ int main() {
         &extensions = requiredDeviceExtensions,
         &uniqueQueueFamilies
     ] {
+        const float queuePriority = 1.0f;
         std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
         for (const auto& e : uniqueQueueFamilies) {
-            float queuePriority = 1.0f;
             queueCreateInfos.push_back({
                 .flags = {},
                 .queueFamilyIndex = e,
@@ -1226,19 +1226,19 @@ int main() {
     ]() mutable { // Draw frame
         const auto& currentFrame = framesInFlight[frameIndex];
         (void) device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
-        auto [res, imageIndex] = device->acquireNextImageKHR(swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
-        if (res != vk::Result::eSuccess) {
-            if (res == vk::Result::eSuboptimalKHR) {
-                // This is not an error, which means that
-                // imageAvailableSemaphore was signaled,
-                // so we can't return without waiting on it
-                framebufferResized = true;
-            } else if (res == vk::Result::eErrorOutOfDateKHR) {
-                framebufferResized = true;
-                return;
-            } else {
-                throw ex::fn("vkAcquireNextImageKHR()", (int) res);
-            }
+        vk::Result res;
+        uint32_t imageIndex;
+        try {
+            std::tie(res, imageIndex) = device->acquireNextImageKHR(swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
+        } catch (const vk::OutOfDateKHRError& e) {
+            framebufferResized = true;
+            return;
+        }
+        if (res == vk::Result::eSuboptimalKHR) {
+            // This is not an error, which means that
+            // imageAvailableSemaphore was signaled,
+            // so we can't return without waiting on it
+            framebufferResized = true;
         }
         device->resetFences(currentFrame.inFlightFence.get());
         [&st, &swapchainInfo, &currentFrame, &camera] {
@@ -1269,20 +1269,20 @@ int main() {
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &currentFrame.renderFinishedSemaphore.get(),
         }, currentFrame.inFlightFence.get());
-        res = presentQueue.presentKHR(vk::PresentInfoKHR {
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &currentFrame.renderFinishedSemaphore.get(),
-            .swapchainCount = 1,
-            .pSwapchains = &swapchain.get(),
-            .pImageIndices = &imageIndex,
-            .pResults = nullptr,
-        });
-        if (res != vk::Result::eSuccess) {
-            if (res == vk::Result::eSuboptimalKHR || res == vk::Result::eErrorOutOfDateKHR) {
-                framebufferResized = true;
-            } else {
-                throw ex::fn("vkQueuePresentKHR()", (int) res);
-            }
+        try {
+            res = presentQueue.presentKHR(vk::PresentInfoKHR {
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &currentFrame.renderFinishedSemaphore.get(),
+                .swapchainCount = 1,
+                .pSwapchains = &swapchain.get(),
+                .pImageIndices = &imageIndex,
+                .pResults = nullptr,
+            });
+        } catch (const vk::OutOfDateKHRError& e) {
+            framebufferResized = true;
+        }
+        if (res == vk::Result::eSuboptimalKHR) {
+            framebufferResized = true;
         }
         frameIndex = (frameIndex + 1) % maxFramesInFlight;
     };
