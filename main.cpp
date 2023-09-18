@@ -14,6 +14,8 @@
 #include "primitives.h"
 #include "FrameCounter.h"
 #include "load_image.h"
+#include "input.h"
+#include "load_obj.h"
 
 int main() {
     const struct glfwInstanceGuard {
@@ -537,6 +539,7 @@ int main() {
     struct Vertex {
         Vector3 pos;
         Vector2 uv;
+        constexpr bool operator==(const Vertex&) const = default;
     };
     constexpr vk::VertexInputBindingDescription bindingDescription = {
         .binding = 0,
@@ -584,9 +587,7 @@ int main() {
             //     vk::PresentModeKHR::eFifo,        // Always force Vsync
             //     vk::PresentModeKHR::eImmediate,   // No VSync
             // });
-            const auto preferredModes = std::to_array<vk::PresentModeKHR>({
-                vk::PresentModeKHR::eFifo,        // Always force Vsync
-            });
+            const auto preferredModes = std::to_array<vk::PresentModeKHR>({vk::PresentModeKHR::eFifo});
             const auto modeNames = std::to_array({
                 "VK_PRESENT_MODE_IMMEDIATE_KHR",
                 "VK_PRESENT_MODE_MAILBOX_KHR",
@@ -848,7 +849,7 @@ int main() {
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode = vk::PolygonMode::eFill,
             .cullMode = vk::CullModeFlagBits::eBack,
-            .frontFace = vk::FrontFace::eClockwise,
+            .frontFace = vk::FrontFace::eCounterClockwise,
             .depthBiasEnable = VK_FALSE,
             .depthBiasConstantFactor = 0,
             .depthBiasClamp = 0,
@@ -995,55 +996,64 @@ int main() {
     recreateSwapchainUnique();
 
 
-    const auto cubeMesh = primitives::generate_cube(1);
-    const auto vertices = [&cubeMesh] {
-        std::vector<Vertex> ret;
-        for (size_t i = 0; i < cubeMesh.pos.size(); i++) {
-            ret.push_back({cubeMesh.pos[i], cubeMesh.uvs[i]});
-        }
+    // const auto [vertices, indices] = [] {
+    //     const auto cubeMesh = primitives::generate_cube(1);
+    //     std::pair<std::vector<Vertex>, std::vector<uint32_t>> ret;
+    //     for (size_t i = 0; i < cubeMesh.pos.size(); i++) {
+    //         ret.first.push_back({cubeMesh.pos[i], cubeMesh.uvs[i]});
+    //         ret.second.push_back(i);
+    //     }
+    //     return ret;
+    // }();
+    const auto [vertices, indices] = load_obj<Vertex>("models/rat.obj");
+    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
+    const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
+
+    struct Texture {
+        vk::Format format;
+        vk::UniqueImage image;
+        vk::UniqueDeviceMemory deviceMemory;
+        vk::UniqueImageView imageView;
+        vk::UniqueSampler sampler;
+    };
+    Texture texture = [&device, &physicalDevice, &createDeviceLocalTextureUnique] {
+        Texture ret;
+        ret.format = vk::Format::eR8G8B8A8Srgb;
+        std::tie(ret.image, ret.deviceMemory) = createDeviceLocalTextureUnique("textures/rat.jpg", ret.format);
+        ret.imageView = device->createImageViewUnique({
+            .flags = {},
+            .image = ret.image.get(),
+            .viewType = vk::ImageViewType::e2D,
+            .format = ret.format,
+            .components = {},
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        ret.sampler = device->createSamplerUnique({
+            .flags = {},
+            .magFilter = vk::Filter::eLinear,
+            .minFilter = vk::Filter::eLinear,
+            .mipmapMode = vk::SamplerMipmapMode::eLinear,
+            .addressModeU = vk::SamplerAddressMode::eRepeat,
+            .addressModeV = vk::SamplerAddressMode::eRepeat,
+            .addressModeW = vk::SamplerAddressMode::eRepeat,
+            .mipLodBias = 0,
+            .anisotropyEnable = VK_TRUE,
+            .maxAnisotropy = physicalDevice.getProperties().limits.maxSamplerAnisotropy,
+            .compareEnable = VK_FALSE,
+            .compareOp = {},
+            .minLod = 0,
+            .maxLod = 0,
+            .borderColor = {},
+            .unnormalizedCoordinates = false,
+        });
         return ret;
     }();
-    // constexpr auto indices = std::to_array<uint16_t>({
-    //     0, 1, 2,
-    //     2, 3, 0
-    // });
-    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
-    // const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
-
-    const auto textureFormat = vk::Format::eR8G8B8A8Srgb;
-    const auto textureImage = createDeviceLocalTextureUnique("textures/bricks.png", textureFormat);
-    const auto textureImageView = device->createImageViewUnique({
-        .flags = {},
-        .image = textureImage.first.get(),
-        .viewType = vk::ImageViewType::e2D,
-        .format = textureFormat,
-        .components = {},
-        .subresourceRange = {
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    });
-    const auto textureSampler = device->createSamplerUnique({
-        .flags = {},
-        .magFilter = vk::Filter::eLinear,
-        .minFilter = vk::Filter::eLinear,
-        .mipmapMode = vk::SamplerMipmapMode::eLinear,
-        .addressModeU = vk::SamplerAddressMode::eRepeat,
-        .addressModeV = vk::SamplerAddressMode::eRepeat,
-        .addressModeW = vk::SamplerAddressMode::eRepeat,
-        .mipLodBias = 0,
-        .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy = physicalDevice.getProperties().limits.maxSamplerAnisotropy,
-        .compareEnable = VK_FALSE,
-        .compareOp = {},
-        .minLod = 0,
-        .maxLod = 0,
-        .borderColor = {},
-        .unnormalizedCoordinates = false,
-    });
 
     // Create command pool
     const auto commandPool = device->createCommandPoolUnique({
@@ -1107,8 +1117,8 @@ int main() {
             .range = vk::WholeSize,
         };
         vk::DescriptorImageInfo imageInfo = {
-            .sampler = textureSampler.get(),
-            .imageView = textureImageView.get(),
+            .sampler = texture.sampler.get(),
+            .imageView = texture.imageView.get(),
             .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
         };
         device->updateDescriptorSets({
@@ -1143,9 +1153,9 @@ int main() {
         &graphicsPipeline,
         &pipelineLayout,
         &vertexBuffer,
-        nVertices = vertices.size(),
-        // &indexBuffer,
-        // nIndices = indices.size(),
+        // nVertices = vertices.size(),
+        &indexBuffer,
+        nIndices = indices.size(),
         &imageExtent = swapchainInfo.imageExtent,
         &swapchainFramebuffers
     ](const vk::UniqueCommandBuffer& commandBuffer, uint32_t imageIndex, const vk::UniqueDescriptorSet& descriptorSet) {
@@ -1176,7 +1186,7 @@ int main() {
         }, vk::SubpassContents::eInline);
         commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, graphicsPipeline.get());
         commandBuffer->bindVertexBuffers(0, {vertexBuffer.get()}, {0});
-        // commandBuffer->bindIndexBuffer(indexBuffer.get(), 0, vk::IndexType::eUint16);
+        commandBuffer->bindIndexBuffer(indexBuffer.get(), 0, vk::IndexType::eUint32);
         commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipelineLayout.get(), 0, descriptorSet.get(), nullptr);
         commandBuffer->setViewport(0, vk::Viewport {
             .x = 0,
@@ -1190,11 +1200,16 @@ int main() {
             .offset = {0, 0},
             .extent = imageExtent,
         });
-        commandBuffer->draw(nVertices, 1, 0, 0);
-        // commandBuffer->drawIndexed(nIndices, 1, 0, 0, 0);
+        // commandBuffer->draw(nVertices, 1, 0, 0);
+        commandBuffer->drawIndexed(nIndices, 1, 0, 0, 0);
         commandBuffer->endRenderPass();
         commandBuffer->end();
     };
+
+    SpaceCamera camera = {{
+        .position = {0, 5, 0},
+        .rotation = Quaternion::Euler({0, 0, std::numbers::pi}),
+    }};
 
     auto drawFrame = [
         &device,
@@ -1204,6 +1219,7 @@ int main() {
         &framesInFlight,
         &graphicsQueue,
         &presentQueue,
+        &camera,
         frameIndex = 0,
         st = Stopwatch(),
         &framebufferResized // mutable
@@ -1225,20 +1241,18 @@ int main() {
             }
         }
         device->resetFences(currentFrame.inFlightFence.get());
-        [&st, &swapchainInfo, &currentFrame] {
+        [&st, &swapchainInfo, &currentFrame, &camera] {
             float time = st.ping() / 1000;
             Transform transform = {
                 .position = {0, 0, 0},
-                .rotation = Quaternion::Euler({time/3, time/2, time}),
-                .scale = Vector3(1.0),
+                .rotation = Quaternion::Euler(Vector3(time/7, time/5, time) * 3.5),
+                .scale = Vector3(1),
             };
-            SpaceCamera camera = {{
-                .position = {0, -2, 0},
-            }};
-            Matrix4 model = transform.Matrix();
+            Matrix4 model = transform.Matrix() * Vector3(0, 0, -0.25).TranslationMatrix();
             Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
             float aspect = (float) swapchainInfo.imageExtent.width / swapchainInfo.imageExtent.height;
-            Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10});
+            Matrix4 proj = Transform::PerspectiveProjection(30, aspect, {0.1, 10}) * Transform::y_flip;
+            // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
             UniformBuffer ubo = {
                 .MVP = (proj * view * model).Transposed(),
             };
@@ -1274,11 +1288,14 @@ int main() {
     };
 
     // Main loop
-    [&window, &drawFrame, &framebufferResized, &device, &recreateSwapchainUnique] {
+    [&window, &drawFrame, &framebufferResized, &device, &recreateSwapchainUnique, &camera] {
         FrameCounter frameCounter;
         Stopwatch benchStopwatch;
         while (!glfwWindowShouldClose(window.get())) {
             glfwPollEvents();
+            const float dt = frameCounter.deltaTime / 1000;
+            camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(window.get()) * 3 * dt);
+            camera.position += camera.rotation.Rotate(input::get_move(window.get()) * 0.75 * dt);
             drawFrame();
             frameCounter.tick();
             if (frameCounter.frameCount == 0) {
