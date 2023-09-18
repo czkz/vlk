@@ -1212,7 +1212,12 @@ int main() {
         (void) device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
         auto [res, imageIndex] = device->acquireNextImageKHR(swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
         if (res != vk::Result::eSuccess) {
-            if (res == vk::Result::eSuboptimalKHR || res == vk::Result::eErrorOutOfDateKHR) {
+            if (res == vk::Result::eSuboptimalKHR) {
+                // This is not an error, which means that
+                // imageAvailableSemaphore was signaled,
+                // so we can't return without waiting on it
+                framebufferResized = true;
+            } else if (res == vk::Result::eErrorOutOfDateKHR) {
                 framebufferResized = true;
                 return;
             } else {
