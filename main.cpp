@@ -35,9 +35,7 @@ int main() {
     // Create Vulkan instance
     const auto instance = [] {
         // List of required instance layers
-        const auto requiredInstanceLayers = std::to_array({
-            "VK_LAYER_KHRONOS_validation",
-        });
+        const auto requiredInstanceLayers = std::to_array({"VK_LAYER_KHRONOS_validation"});
         // const std::array<const char*, 0> requiredInstanceLayers;
 
         // Check layer support
@@ -49,7 +47,7 @@ int main() {
 
             for (const auto& name : requiredInstanceLayers) {
                 if (!std::ranges::any_of(availableInstanceLayers, [name](const auto& e) { return std::string_view(e.layerName) == name; })) {
-                    throw ex::runtime(fmt("Layer", name, "not available"));
+                    throw ex::runtime(fmt("layer", name, "not available"));
                 }
             }
         }();
@@ -72,7 +70,7 @@ int main() {
 
             for (const auto& name : requiredInstanceExtensions) {
                 if (!std::ranges::any_of(availableInstanceExtensions, [name](const auto& e) { return std::string_view(e.extensionName) == name; })) {
-                    throw ex::runtime(fmt("Extension", name, "not available"));
+                    throw ex::runtime(fmt("extension", name, "not available"));
                 }
             }
         }();
@@ -86,17 +84,14 @@ int main() {
                 .engineVersion = VK_MAKE_VERSION(1, 0, 0),
                 .apiVersion = VK_API_VERSION_1_0,
             };
-
-            const vk::InstanceCreateInfo createInfo = {
+            return vk::createInstanceUnique({
                 .flags = {},
                 .pApplicationInfo = &appInfo,
                 .enabledLayerCount = (uint32_t) requiredInstanceLayers.size(),
                 .ppEnabledLayerNames = requiredInstanceLayers.data(),
                 .enabledExtensionCount = (uint32_t) requiredInstanceExtensions.size(),
                 .ppEnabledExtensionNames = requiredInstanceExtensions.data(),
-            };
-
-            return vk::createInstanceUnique(createInfo);
+            });
         }();
     }();
 
@@ -117,7 +112,7 @@ int main() {
         // Get a list of available devices
         const auto availableDevices = instance->enumeratePhysicalDevices();
         if (availableDevices.size() == 0) {
-            throw ex::runtime("Couldn't find devices with Vulkan support");
+            throw ex::runtime("couldn't find devices with Vulkan support");
         }
 
         // Print available devices
@@ -184,8 +179,8 @@ int main() {
             std::ranges::copy_if(availableDevices, std::back_inserter(ret), isSuitable);
             return ret;
         }();
-        if (suitableDevices.size() == 0) {
-            throw ex::runtime("Couldn't find a suitable device");
+        if (suitableDevices.empty()) {
+            throw ex::runtime("couldn't find a suitable device");
         }
 
         prn("Suitable physical devices:");
@@ -196,26 +191,21 @@ int main() {
         // Pick best
         return [&suitableDevices] {
             const auto compare = [](const vk::PhysicalDevice& a, const vk::PhysicalDevice& b) {
-                const auto typeToPriority = [](const auto& type) {
-                    using t = vk::PhysicalDeviceType;
-                    if (t::eDiscreteGpu == type) {
-                        return 0;
-                    } else if (t::eOther == type) {
-                        return 1;
-                    } else if (t::eIntegratedGpu == type) {
-                        return 2;
-                    } else if (t::eVirtualGpu == type) {
-                        return 3;
-                    }
-                    assert(false);
+                using t = vk::PhysicalDeviceType;
+                std::map<t, int> typeToPriority {
+                    {t::eDiscreteGpu,   0},
+                    {t::eOther,         1},
+                    {t::eIntegratedGpu, 2},
+                    {t::eVirtualGpu,    3},
                 };
-                return
-                    typeToPriority(a.getProperties().deviceType) <
-                    typeToPriority(a.getProperties().deviceType) ||
-                    a.getMemoryProperties().memoryHeaps.at(0).size >
-                    b.getMemoryProperties().memoryHeaps.at(0).size;
+                int p0 = typeToPriority[a.getProperties().deviceType];
+                int p1 = typeToPriority[b.getProperties().deviceType];
+                auto m0 = a.getMemoryProperties().memoryHeaps.at(0).size;
+                auto m1 = b.getMemoryProperties().memoryHeaps.at(0).size;
+                if (p0 != p1) { return p0 < p1; }
+                return m0 >= m1;
             };
-            return *std::ranges::max_element(suitableDevices, compare);
+            return *std::ranges::min_element(suitableDevices, compare);
         }();
     }();
     prn("Chosen physical device:", std::string_view(physicalDevice.getProperties().deviceName));
@@ -260,15 +250,14 @@ int main() {
         const vk::PhysicalDeviceFeatures usedFeatures {
             .samplerAnisotropy = VK_TRUE,
         };
-        const vk::DeviceCreateInfo deviceCreateInfo = {
+        return physicalDevice.createDeviceUnique({
             .flags = {},
             .queueCreateInfoCount = (uint32_t) queueCreateInfos.size(),
             .pQueueCreateInfos = queueCreateInfos.data(),
             .enabledExtensionCount = (uint32_t) extensions.size(), // Device extensions, not instance extensions
             .ppEnabledExtensionNames = extensions.data(),
             .pEnabledFeatures = &usedFeatures,
-        };
-        return physicalDevice.createDeviceUnique(deviceCreateInfo);
+        });
     }();
 
     const vk::Queue graphicsQueue = device->getQueue(graphicsQueueFamily, 0);
@@ -285,46 +274,32 @@ int main() {
                 return i;
             }
         }
-        throw ex::runtime("Couldn't find suitable memory type");
+        throw ex::runtime("couldn't find suitable memory type");
     };
     const auto createBufferUnique = [&device, &findMemoryType](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
-        // Create buffer
-        vk::UniqueBuffer buffer = [&device, nBytes, usage] {
-            vk::BufferCreateInfo createInfo = {
-                .flags = {},
-                .size = nBytes,
-                .usage = usage,
-                .sharingMode = vk::SharingMode::eExclusive,
-                .queueFamilyIndexCount = 0,
-                .pQueueFamilyIndices = nullptr,
-            };
-            return device->createBufferUnique(createInfo);
-        }();
-
-        // Allocate memory for the buffer
-        vk::UniqueDeviceMemory deviceMemory = [&device, &buffer, &properties, &findMemoryType] {
-            auto memoryRequirements = device->getBufferMemoryRequirements(buffer.get());
-            vk::MemoryAllocateInfo allocInfo = {
-                .allocationSize = memoryRequirements.size,
-                .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties),
-            };
-            vk::UniqueDeviceMemory ret = device->allocateMemoryUnique(allocInfo);
-            device->bindBufferMemory(buffer.get(), ret.get(), 0);
-            return ret;
-        }();
-        return std::pair {
-            std::move(buffer),
-            std::move(deviceMemory)
-        };
+        auto buffer = device->createBufferUnique({
+            .flags = {},
+            .size = nBytes,
+            .usage = usage,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        });
+        auto memoryRequirements = device->getBufferMemoryRequirements(buffer.get());
+        auto memory = device->allocateMemoryUnique({
+            .allocationSize = memoryRequirements.size,
+            .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties),
+        });
+        device->bindBufferMemory(buffer.get(), memory.get(), 0);
+        return std::pair(std::move(buffer), std::move(memory));
     };
-    const auto createImageUnique = [&device, &findMemoryType](const vk::ImageCreateInfo& createInfo, const vk::MemoryPropertyFlags& memoryProperties) {
+    const auto createImageUnique = [&device, &findMemoryType](const vk::ImageCreateInfo& createInfo, vk::MemoryPropertyFlags memoryProperties) {
         auto image = device->createImageUnique(createInfo);
         auto memoryRequirements = device->getImageMemoryRequirements(image.get());
-        vk::MemoryAllocateInfo allocInfo = {
+        auto memory = device->allocateMemoryUnique({
             .allocationSize = memoryRequirements.size,
             .memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, memoryProperties),
-        };
-        vk::UniqueDeviceMemory memory = device->allocateMemoryUnique(allocInfo);
+        });
         device->bindImageMemory(image.get(), memory.get(), 0);
         return std::pair(std::move(image), std::move(memory));
     };
@@ -631,7 +606,7 @@ int main() {
         std::vector<uint32_t> uniqueQueueFamiliesVec;
         for (const auto& e : uniqueQueueFamilies) { uniqueQueueFamiliesVec.push_back(e); }
 
-        vk::SwapchainCreateInfoKHR createInfo = {
+        return vk::SwapchainCreateInfoKHR {
             .flags = {},
             .surface = surface,
             .minImageCount = bestImageCount,
@@ -649,7 +624,6 @@ int main() {
             .clipped = VK_TRUE,
             .oldSwapchain = oldSwapchain,
         };
-        return createInfo;
     };
     const auto createSwapchainImageViewsUnique = [&device](const vk::SwapchainKHR& swapchain, vk::Format format) {
         std::vector<vk::UniqueImageView> ret;
@@ -677,7 +651,8 @@ int main() {
         vk::UniqueImageView imageView;
     };
     const auto createDepthAttachmentUnique = [&device, &createImageUnique](vk::Extent2D extent) {
-        auto depthImage = createImageUnique({
+        DepthAttachment ret;
+        std::tie(ret.image, ret.deviceMemory) = createImageUnique({
             .flags = {},
             .imageType = vk::ImageType::e2D,
             .format = vk::Format::eD32Sfloat,
@@ -696,9 +671,9 @@ int main() {
             .pQueueFamilyIndices = nullptr, // For shared sharingMode
             .initialLayout = vk::ImageLayout::eUndefined,
         }, vk::MemoryPropertyFlagBits::eDeviceLocal);
-        auto depthImageView = device->createImageViewUnique({
+        ret.imageView = device->createImageViewUnique({
             .flags = {},
-            .image = depthImage.first.get(),
+            .image = ret.image.get(),
             .viewType = vk::ImageViewType::e2D,
             .format = vk::Format::eD32Sfloat,
             .components = {},
@@ -710,11 +685,7 @@ int main() {
                 .layerCount = 1,
             },
         });
-        return DepthAttachment {
-            .image        = std::move(depthImage.first),
-            .deviceMemory = std::move(depthImage.second),
-            .imageView    = std::move(depthImageView),
-        };
+        return ret;
     };
     const auto createRenderPassUnique = [&device](vk::Format format) {
         vk::AttachmentDescription colorAttachmentDesc = {
@@ -805,16 +776,16 @@ int main() {
         return ret;
     };
     const auto createGraphicsPipelineUnique = [&device, &bindingDescription, &attributeDescriptions](
-        vk::PipelineLayout pipelineLayout,
-        vk::RenderPass renderPass,
-        vk::ShaderModule vertShaderModule,
-        vk::ShaderModule fragShaderModule
+        const vk::UniquePipelineLayout& pipelineLayout,
+        const vk::UniqueRenderPass& renderPass,
+        const vk::UniqueShaderModule& vertShaderModule,
+        const vk::UniqueShaderModule& fragShaderModule
     ) {
-        const auto genShaderStageCreateInfo = [](auto stage, auto module) {
+        const auto genShaderStageCreateInfo = [](auto stage, const auto& module) {
             vk::PipelineShaderStageCreateInfo createInfo = {
                 .flags = {},
                 .stage = stage,
-                .module = module,
+                .module = module.get(),
                 .pName = "main",
                 .pSpecializationInfo = nullptr,
             };
@@ -917,8 +888,8 @@ int main() {
             .pDepthStencilState = &depthStencilState,
             .pColorBlendState = &colorBlendState,
             .pDynamicState = &dynamicState,
-            .layout = pipelineLayout,
-            .renderPass = renderPass,
+            .layout = pipelineLayout.get(),
+            .renderPass = renderPass.get(),
             .subpass = 0,
             .basePipelineHandle = VK_NULL_HANDLE,
             .basePipelineIndex = -1,
@@ -945,14 +916,11 @@ int main() {
             .pImmutableSamplers = nullptr,
         },
     });
-
     const auto descriptorSetLayout = device->createDescriptorSetLayoutUnique({
         .flags = {},
         .bindingCount = bindings.size(),
         .pBindings = bindings.data(),
     });
-
-    // Create pipeline layout
     const auto pipelineLayout = device->createPipelineLayoutUnique({
         .flags = {},
         .setLayoutCount = 1,
@@ -962,14 +930,13 @@ int main() {
     });
 
     const auto createShaderModuleUnique = [&device](std::string_view code) {
-        vk::ShaderModuleCreateInfo createInfo = {
+        return device->createShaderModuleUnique({
             .flags = {},
             .codeSize = code.size(),
             .pCode = reinterpret_cast<const uint32_t*>(code.data()),
-        };
-        return device->createShaderModuleUnique(createInfo);
+        });
     };
-    constexpr auto slurp = [](const char* filename) {
+    const auto slurp = [](const char* filename) {
         std::ifstream f(filename);
         return std::string(std::istreambuf_iterator<char>(f), {});
     };
@@ -991,7 +958,7 @@ int main() {
         swapchainDepthAttachment = createDepthAttachmentUnique(swapchainInfo.imageExtent);
         renderPass               = createRenderPassUnique(swapchainInfo.imageFormat);
         swapchainFramebuffers    = createFramebuffersUnique(swapchainImageViews, swapchainDepthAttachment.imageView, swapchainInfo.imageExtent, renderPass.get());
-        graphicsPipeline         = createGraphicsPipelineUnique(pipelineLayout.get(), renderPass.get(), vertShader.get(), fragShader.get());
+        graphicsPipeline         = createGraphicsPipelineUnique(pipelineLayout, renderPass, vertShader, fragShader);
     };
     recreateSwapchainUnique();
 
@@ -1055,7 +1022,6 @@ int main() {
         return ret;
     }();
 
-    // Create command pool
     const auto commandPool = device->createCommandPoolUnique({
         .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
         .queueFamilyIndex = graphicsQueueFamily,
@@ -1104,13 +1070,12 @@ int main() {
             .flags = vk::FenceCreateFlagBits::eSignaled,
         });
         f.uniformBuffer = createBufferUnique(sizeof(UniformBuffer), vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-        f.uniformBufferMapping = nullptr;
+        f.uniformBufferMapping = device->mapMemory(f.uniformBuffer.second.get(), 0, sizeof(UniformBuffer), {});
         f.descriptorSet = std::move(device->allocateDescriptorSetsUnique({
             .descriptorPool = descriptorPool.get(),
             .descriptorSetCount = 1,
             .pSetLayouts = &descriptorSetLayout.get(),
         })[0]);
-        f.uniformBufferMapping = device->mapMemory(f.uniformBuffer.second.get(), 0, sizeof(UniformBuffer), {});
         vk::DescriptorBufferInfo bufferInfo = {
             .buffer = f.uniformBuffer.first.get(),
             .offset = 0,
@@ -1321,9 +1286,5 @@ int main() {
             }
         }
     }();
-    // Wait for all frames to finish rendering
-    std::vector<vk::Fence> inFlightFencesVec;
-    for (const auto& e : framesInFlight) { inFlightFencesVec.push_back(e.inFlightFence.get()); }
-    (void) device->waitForFences(inFlightFencesVec, VK_TRUE, -1);
-    device->waitIdle(); // Unnecessary, but silences a validation layer bug
+    device->waitIdle();
 }
