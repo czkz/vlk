@@ -677,6 +677,25 @@ int main() {
     });
 
 
+    struct ImageAttachment {
+        vk::UniqueImage image;
+        vk::UniqueDeviceMemory deviceMemory;
+        vk::UniqueImageView imageView;
+    };
+    const auto sampleCount = [&physicalDevice] {
+        auto limits = physicalDevice.getProperties().limits;
+        vk::SampleCountFlags counts = limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts;
+        if (counts & vk::SampleCountFlagBits::e64) { return vk::SampleCountFlagBits::e64; }
+        if (counts & vk::SampleCountFlagBits::e32) { return vk::SampleCountFlagBits::e32; }
+        if (counts & vk::SampleCountFlagBits::e16) { return vk::SampleCountFlagBits::e16; }
+        if (counts & vk::SampleCountFlagBits::e8) { return vk::SampleCountFlagBits::e8; }
+        if (counts & vk::SampleCountFlagBits::e4) { return vk::SampleCountFlagBits::e4; }
+        if (counts & vk::SampleCountFlagBits::e2) { return vk::SampleCountFlagBits::e2; }
+        if (counts & vk::SampleCountFlagBits::e1) { return vk::SampleCountFlagBits::e1; }
+        assert(false);
+    }();
+    prn("Using sample count:", static_cast<uint32_t>(sampleCount));
+
     const auto pickSwapchainSettings = [
         &physicalDevice,
         &surface = surface.get(),
@@ -786,13 +805,45 @@ int main() {
         }
         return ret;
     };
-    struct DepthAttachment {
-        vk::UniqueImage image;
-        vk::UniqueDeviceMemory deviceMemory;
-        vk::UniqueImageView imageView;
+    const auto createColorAttachmentUnique = [&device, &createImageUnique, &sampleCount](vk::Format format, vk::Extent2D extent) {
+        ImageAttachment ret;
+        std::tie(ret.image, ret.deviceMemory) = createImageUnique({
+            .flags = {},
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {
+                extent.width,
+                extent.height,
+                1
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = sampleCount,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        }, vk::MemoryPropertyFlagBits::eDeviceLocal);
+        ret.imageView = device->createImageViewUnique({
+            .flags = {},
+            .image = ret.image.get(),
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .components = {},
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        });
+        return ret;
     };
-    const auto createDepthAttachmentUnique = [&device, &createImageUnique](vk::Extent2D extent) {
-        DepthAttachment ret;
+    const auto createDepthAttachmentUnique = [&device, &createImageUnique, &sampleCount](vk::Extent2D extent) {
+        ImageAttachment ret;
         std::tie(ret.image, ret.deviceMemory) = createImageUnique({
             .flags = {},
             .imageType = vk::ImageType::e2D,
@@ -804,7 +855,7 @@ int main() {
             },
             .mipLevels = 1,
             .arrayLayers = 1,
-            .samples = vk::SampleCountFlagBits::e1,
+            .samples = sampleCount,
             .tiling = vk::ImageTiling::eOptimal,
             .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment,
             .sharingMode = vk::SharingMode::eExclusive,
@@ -828,28 +879,39 @@ int main() {
         });
         return ret;
     };
-    const auto createRenderPassUnique = [&device](vk::Format format) {
+    const auto createRenderPassUnique = [&device, &sampleCount](vk::Format format) {
         vk::AttachmentDescription colorAttachmentDesc = {
             .flags = {},
             .format = format,
-            .samples = vk::SampleCountFlagBits::e1,
+            .samples = sampleCount,
             .loadOp = vk::AttachmentLoadOp::eClear,
-            .storeOp = vk::AttachmentStoreOp::eStore,
+            .storeOp = vk::AttachmentStoreOp::eDontCare,
             .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
             .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
             .initialLayout = vk::ImageLayout::eUndefined,
-            .finalLayout = vk::ImageLayout::ePresentSrcKHR,
+            .finalLayout = vk::ImageLayout::eColorAttachmentOptimal,
         };
         vk::AttachmentDescription depthAttachmentDesc = {
             .flags = {},
             .format = vk::Format::eD32Sfloat,
-            .samples = vk::SampleCountFlagBits::e1,
+            .samples = sampleCount,
             .loadOp = vk::AttachmentLoadOp::eClear,
             .storeOp = vk::AttachmentStoreOp::eDontCare,
             .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
             .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
             .initialLayout = vk::ImageLayout::eUndefined,
             .finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+        };
+        vk::AttachmentDescription colorResolveDesc = {
+            .flags = {},
+            .format = format,
+            .samples = vk::SampleCountFlagBits::e1,
+            .loadOp = vk::AttachmentLoadOp::eDontCare,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+            .initialLayout = vk::ImageLayout::eUndefined,
+            .finalLayout = vk::ImageLayout::ePresentSrcKHR,
         };
         vk::AttachmentReference colorAttachmentRef = {
             .attachment = 0,
@@ -859,6 +921,10 @@ int main() {
             .attachment = 1,
             .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
         };
+        vk::AttachmentReference colorResolveRef = {
+            .attachment = 2,
+            .layout = vk::ImageLayout::eColorAttachmentOptimal,
+        };
         vk::SubpassDescription subpass = {
             .flags = {},
             .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
@@ -866,7 +932,7 @@ int main() {
             .pInputAttachments = nullptr,
             .colorAttachmentCount = 1,
             .pColorAttachments = &colorAttachmentRef,
-            .pResolveAttachments = nullptr,
+            .pResolveAttachments = &colorResolveRef,
             .pDepthStencilAttachment = &depthAttachmentRef,
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = nullptr,
@@ -881,7 +947,7 @@ int main() {
             .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
             .dependencyFlags = {},
         };
-        const auto attachmentDescriptions = std::to_array({colorAttachmentDesc, depthAttachmentDesc});
+        const auto attachmentDescriptions = std::to_array({colorAttachmentDesc, depthAttachmentDesc, colorResolveDesc});
         vk::RenderPassCreateInfo createInfo = {
             .flags = {},
             .attachmentCount = attachmentDescriptions.size(),
@@ -894,16 +960,18 @@ int main() {
         return device->createRenderPassUnique(createInfo);
     };
     const auto createFramebuffersUnique = [&device](
-        std::span<const vk::UniqueImageView> colorImageViews,
+        const vk::UniqueImageView& colorImageView,
         const vk::UniqueImageView& depthImageView,
+        std::span<const vk::UniqueImageView> swapchainImageViews,
         const vk::Extent2D& extent,
         const vk::RenderPass& renderPass
     ) {
         std::vector<vk::UniqueFramebuffer> ret;
-        for (const auto& imageView : colorImageViews) {
+        for (const auto& swapchainImageView : swapchainImageViews) {
             const auto attachments = std::to_array({
-                imageView.get(),
+                colorImageView.get(),
                 depthImageView.get(),
+                swapchainImageView.get(),
             });
             ret.push_back(device->createFramebufferUnique({
                 .flags = {},
@@ -917,7 +985,7 @@ int main() {
         }
         return ret;
     };
-    const auto createGraphicsPipelineUnique = [&device, &bindingDescription, &attributeDescriptions](
+    const auto createGraphicsPipelineUnique = [&device, &bindingDescription, &attributeDescriptions, &sampleCount](
         const vk::UniquePipelineLayout& pipelineLayout,
         const vk::UniqueRenderPass& renderPass,
         const vk::UniqueShaderModule& vertShaderModule,
@@ -971,7 +1039,7 @@ int main() {
         };
         vk::PipelineMultisampleStateCreateInfo multisampleState = {
             .flags = {},
-            .rasterizationSamples = vk::SampleCountFlagBits::e1,
+            .rasterizationSamples = sampleCount,
             .sampleShadingEnable = VK_FALSE,
             .minSampleShading = 1,
             .pSampleMask = nullptr,
@@ -1088,7 +1156,8 @@ int main() {
     vk::SwapchainCreateInfoKHR         swapchainInfo;
     vk::UniqueSwapchainKHR             swapchain;
     std::vector<vk::UniqueImageView>   swapchainImageViews;
-    DepthAttachment                    swapchainDepthAttachment;
+    ImageAttachment                    swapchainColorAttachment;
+    ImageAttachment                    swapchainDepthAttachment;
     vk::UniqueRenderPass               renderPass;
     std::vector<vk::UniqueFramebuffer> swapchainFramebuffers;
     vk::UniquePipeline                 graphicsPipeline;
@@ -1097,9 +1166,16 @@ int main() {
         swapchainInfo            = pickSwapchainSettings(swapchain.get());
         swapchain                = device->createSwapchainKHRUnique(swapchainInfo);
         swapchainImageViews      = createSwapchainImageViewsUnique(swapchain.get(), swapchainInfo.imageFormat);
+        swapchainColorAttachment = createColorAttachmentUnique(swapchainInfo.imageFormat, swapchainInfo.imageExtent);
         swapchainDepthAttachment = createDepthAttachmentUnique(swapchainInfo.imageExtent);
         renderPass               = createRenderPassUnique(swapchainInfo.imageFormat);
-        swapchainFramebuffers    = createFramebuffersUnique(swapchainImageViews, swapchainDepthAttachment.imageView, swapchainInfo.imageExtent, renderPass.get());
+        swapchainFramebuffers    = createFramebuffersUnique(
+            swapchainColorAttachment.imageView,
+            swapchainDepthAttachment.imageView,
+            swapchainImageViews,
+            swapchainInfo.imageExtent,
+            renderPass.get()
+        );
         graphicsPipeline         = createGraphicsPipelineUnique(pipelineLayout, renderPass, vertShader, fragShader);
     };
     recreateSwapchainUnique();
