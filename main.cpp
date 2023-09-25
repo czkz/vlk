@@ -226,9 +226,8 @@ int main() {
     // Get queue family indices for chosen device
     const auto graphicsQueueFamily = [&queueFamilyProperties] {
         for (uint32_t i = 0; i < queueFamilyProperties.size(); i++) {
-            if (queueFamilyProperties[i].queueFlags & vk::QueueFlagBits::eGraphics) {
-                return i;
-            }
+            if (!(queueFamilyProperties[i].queueFlags & vk::QueueFlagBits::eGraphics)) { continue; }
+            return i;
         }
         assert(false);
     }();
@@ -285,7 +284,10 @@ int main() {
         vk::UniqueDeviceMemory deviceMemory;
         vk::UniqueImageView imageView;
     };
-    const auto findMemoryType = [&physicalDevice](uint32_t typeFilter, vk::MemoryPropertyFlags requiredProperties) {
+    const auto findMemoryType = [&physicalDevice](
+        uint32_t typeFilter,
+        vk::MemoryPropertyFlags requiredProperties
+    ) {
         const auto memoryProperties = physicalDevice.getMemoryProperties();
         for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
             if (
@@ -297,7 +299,11 @@ int main() {
         }
         throw ex::runtime("couldn't find suitable memory type");
     };
-    const auto createBufferUnique = [&device, &findMemoryType](size_t nBytes, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties) {
+    const auto createBufferUnique = [&device, &findMemoryType](
+        size_t nBytes,
+        vk::BufferUsageFlags usage,
+        vk::MemoryPropertyFlags properties
+    ) {
         auto buffer = device->createBufferUnique({
             .flags = {},
             .size = nBytes,
@@ -314,7 +320,10 @@ int main() {
         device->bindBufferMemory(buffer.get(), memory.get(), 0);
         return std::pair(std::move(buffer), std::move(memory));
     };
-    const auto createImageUnique = [&device, &findMemoryType](const vk::ImageCreateInfo& createInfo, vk::MemoryPropertyFlags memoryProperties) {
+    const auto createImageUnique = [&device, &findMemoryType](
+        const vk::ImageCreateInfo& createInfo,
+        vk::MemoryPropertyFlags memoryProperties
+    ) {
         auto image = device->createImageUnique(createInfo);
         auto memoryRequirements = device->getImageMemoryRequirements(image.get());
         auto memory = device->allocateMemoryUnique({
@@ -324,7 +333,10 @@ int main() {
         device->bindImageMemory(image.get(), memory.get(), 0);
         return std::pair(std::move(image), std::move(memory));
     };
-    const auto fillBuffer = [&device](const vk::UniqueDeviceMemory& memory, const auto& data) {
+    const auto fillBuffer = [&device](
+        const vk::UniqueDeviceMemory& memory,
+        const auto& data
+    ) {
         std::span bytes = data;
         void* mapped = device->mapMemory(memory.get(), 0, bytes.size_bytes(), {});
         memcpy(mapped, bytes.data(), bytes.size_bytes());
@@ -663,7 +675,11 @@ int main() {
         });
         return ret;
     };
-    const auto createImageAttachmentUnique = [&device, &createImageUnique](const vk::ImageCreateInfo& createInfo, vk::MemoryPropertyFlags memoryProperties, vk::ImageAspectFlags aspectMask = vk::ImageAspectFlagBits::eColor) {
+    const auto createImageAttachmentUnique = [&device, &createImageUnique](
+        const vk::ImageCreateInfo& createInfo,
+        vk::MemoryPropertyFlags memoryProperties,
+        vk::ImageAspectFlags aspectMask = vk::ImageAspectFlagBits::eColor
+    ) {
         ImageAttachment ret;
         std::tie(ret.image, ret.deviceMemory) = createImageUnique(createInfo, memoryProperties);
         ret.imageView = device->createImageViewUnique({
@@ -682,6 +698,28 @@ int main() {
         });
         return ret;
     };
+    const auto createShaderModuleUnique = [&device](const char* filename) {
+        const auto slurp = [](const char* filename) {
+            std::ifstream f(filename);
+            return std::string(std::istreambuf_iterator<char>(f), {});
+        };
+        const auto code = slurp(filename);
+        return device->createShaderModuleUnique({
+            .flags = {},
+            .codeSize = code.size(),
+            .pCode = reinterpret_cast<const uint32_t*>(code.data()),
+        });
+    };
+    const auto genShaderStageCreateInfo = [](auto stage, const auto& module) {
+        vk::PipelineShaderStageCreateInfo createInfo = {
+            .flags = {},
+            .stage = stage,
+            .module = module.get(),
+            .pName = "main",
+            .pSpecializationInfo = nullptr,
+        };
+        return createInfo;
+    };
 
 
     struct Vertex {
@@ -694,13 +732,14 @@ int main() {
         .stride = sizeof(Vertex),
         .inputRate = vk::VertexInputRate::eVertex,
     };
-    constexpr auto attributeDescriptions = std::to_array<vk::VertexInputAttributeDescription>({
-        {
+    constexpr auto attributeDescriptions = std::to_array({
+        vk::VertexInputAttributeDescription {
             .location = 0,
             .binding = 0,
             .format = vk::Format::eR32G32B32Sfloat,
             .offset = offsetof(Vertex, pos),
-        }, {
+        },
+        vk::VertexInputAttributeDescription {
             .location = 1,
             .binding = 0,
             .format = vk::Format::eR32G32Sfloat,
@@ -711,27 +750,30 @@ int main() {
     struct UniformBuffer {
         alignas(16) Matrix4 MVP;
     };
-    const auto bindings = std::to_array<vk::DescriptorSetLayoutBinding>({
-        {
-            .binding = 0,
-            .descriptorType = vk::DescriptorType::eUniformBuffer,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eVertex,
-            .pImmutableSamplers = nullptr,
-        },
-        {
-            .binding = 1,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment,
-            .pImmutableSamplers = nullptr,
-        },
-    });
-    const auto descriptorSetLayout = device->createDescriptorSetLayoutUnique({
-        .flags = {},
-        .bindingCount = bindings.size(),
-        .pBindings = bindings.data(),
-    });
+
+    const auto descriptorSetLayout = [&] {
+        const auto bindings = std::to_array({
+            vk::DescriptorSetLayoutBinding {
+                .binding = 0,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eVertex,
+                .pImmutableSamplers = nullptr,
+            },
+            vk::DescriptorSetLayoutBinding {
+                .binding = 1,
+                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+                .pImmutableSamplers = nullptr,
+            },
+        });
+        return device->createDescriptorSetLayoutUnique({
+            .flags = {},
+            .bindingCount = bindings.size(),
+            .pBindings = bindings.data(),
+        });
+    }();
     const auto pipelineLayout = device->createPipelineLayoutUnique({
         .flags = {},
         .setLayoutCount = 1,
@@ -739,21 +781,8 @@ int main() {
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = nullptr,
     });
-
-    const auto createShaderModuleUnique = [&device](std::string_view code) {
-        return device->createShaderModuleUnique({
-            .flags = {},
-            .codeSize = code.size(),
-            .pCode = reinterpret_cast<const uint32_t*>(code.data()),
-        });
-    };
-    const auto slurp = [](const char* filename) {
-        std::ifstream f(filename);
-        return std::string(std::istreambuf_iterator<char>(f), {});
-    };
-    const auto vertShader = createShaderModuleUnique(slurp("shaders/triangle.vert.spv"));
-    const auto fragShader = createShaderModuleUnique(slurp("shaders/triangle.frag.spv"));
-
+    const auto vertShader = createShaderModuleUnique("shaders/triangle.vert.spv");
+    const auto fragShader = createShaderModuleUnique("shaders/triangle.frag.spv");
     struct SwapchainResources {
         vk::SwapchainCreateInfoKHR         info;
         vk::UniqueSwapchainKHR             swapchain;
@@ -764,22 +793,7 @@ int main() {
         std::vector<vk::UniqueFramebuffer> framebuffers;
         vk::UniquePipeline                 graphicsPipeline;
     } swapchain;
-
-    const auto recreateSwapchainUnique = [
-        &device,
-        &physicalDevice,
-        &swapchain,
-        &window,
-        &surface,
-        &uniqueQueueFamilies,
-        &maxSampleCount,
-        &bindingDescription,
-        &attributeDescriptions,
-        &vertShader,
-        &fragShader,
-        &pipelineLayout,
-        &createImageAttachmentUnique
-    ]() {
+    const auto recreateSwapchainUnique = [&]() {
         swapchain.info = [
             &physicalDevice,
             &surface = surface.get(),
@@ -1034,18 +1048,9 @@ int main() {
             &pipelineLayout,
             &renderPass = swapchain.renderPass,
             &vertShader,
-            &fragShader
+            &fragShader,
+            &genShaderStageCreateInfo
         ] {
-            const auto genShaderStageCreateInfo = [](auto stage, const auto& module) {
-                vk::PipelineShaderStageCreateInfo createInfo = {
-                    .flags = {},
-                    .stage = stage,
-                    .module = module.get(),
-                    .pName = "main",
-                    .pSpecializationInfo = nullptr,
-                };
-                return createInfo;
-            };
             const auto shaderStages = std::to_array({
                 genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
                 genShaderStageCreateInfo(vk::ShaderStageFlagBits::eFragment, fragShader),
@@ -1155,24 +1160,18 @@ int main() {
     recreateSwapchainUnique();
 
 
-    const auto [vertices, indices] = load_obj<Vertex>("models/cube.obj");
-    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
-    const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
-    const auto texture = createDeviceLocalTextureUnique("textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
-
+    constexpr uint32_t maxFramesInFlight = 2;
     const auto commandPool = device->createCommandPoolUnique({
         .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
         .queueFamilyIndex = graphicsQueueFamily,
     });
-
-    constexpr uint32_t maxFramesInFlight = 2;
-
     const auto descriptorPool = [&device] {
-        const auto poolSizes = std::to_array<vk::DescriptorPoolSize>({
-            {
+        const auto poolSizes = std::to_array({
+            vk::DescriptorPoolSize {
                 .type = vk::DescriptorType::eUniformBuffer,
                 .descriptorCount = maxFramesInFlight,
-            }, {
+            },
+            vk::DescriptorPoolSize {
                 .type = vk::DescriptorType::eCombinedImageSampler,
                 .descriptorCount = maxFramesInFlight,
             },
@@ -1184,7 +1183,6 @@ int main() {
             .pPoolSizes = poolSizes.data(),
         });
     }();
-
     struct FrameInFlight {
         vk::UniqueCommandBuffer commandBuffer;
         vk::UniqueSemaphore imageAvailableSemaphore;
@@ -1214,6 +1212,23 @@ int main() {
             .descriptorSetCount = 1,
             .pSetLayouts = &descriptorSetLayout.get(),
         })[0]);
+        framesInFlight.push_back(std::move(f));
+    }
+
+
+    const auto [vertices, indices] = load_obj<Vertex>("models/cube.obj");
+    const auto [vertexBuffer, vertexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
+    const auto [indexBuffer, indexBufferMemory] = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
+    const auto texture = createDeviceLocalTextureUnique("textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
+
+    auto camera = SpaceCamera({
+        .position = {0, 5, 0},
+        .rotation = Quaternion::Euler({0, 0, std::numbers::pi}),
+    });
+
+    // Bind resources to descriptor set
+    for (uint32_t i = 0; i < maxFramesInFlight; i++) {
+        const auto& f = framesInFlight[i];
         vk::DescriptorBufferInfo bufferInfo = {
             .buffer = f.uniformBuffer.first.get(),
             .offset = 0,
@@ -1246,10 +1261,7 @@ int main() {
                 .pTexelBufferView = nullptr,
             },
         }, nullptr);
-        framesInFlight.push_back(std::move(f));
     }
-
-    bool framebufferResized = false;
 
     const auto recordCommandBuffer = [
         &pipelineLayout,
@@ -1306,24 +1318,43 @@ int main() {
         commandBuffer->end();
     };
 
-    auto camera = SpaceCamera({
-        .position = {0, 5, 0},
-        .rotation = Quaternion::Euler({0, 0, std::numbers::pi}),
-    });
+    const auto processInput = [&camera, &window](float dt) {
+        camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(window.get()) * 3 * dt);
+        camera.position += camera.rotation.Rotate(input::get_move(window.get()) * 0.75 * dt);
+    };
 
-    auto drawFrame = [
+    const auto updateUniforms = [&swapchain, &camera](void* uboMapping, float time, float) {
+        // Transform transform = {
+        //     .position = {0, 0, 0},
+        //     .rotation = Quaternion::Euler(Vector3(time/7, time/5, time) * 3.5)
+        // };
+        // Matrix4 model = transform.Matrix() * Vector3(0, 0, -0.25).TranslationMatrix();
+        Transform transform = {
+            .position = {0, 0, 0},
+            .rotation = Quaternion::Euler(time/3, time/2, time),
+        };
+        Matrix4 model = transform.Matrix();
+        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
+        float aspect = (float) swapchain.info.imageExtent.width / swapchain.info.imageExtent.height;
+        Matrix4 proj = Transform::PerspectiveProjection(30, aspect, {0.1, 10}) * Transform::y_flip;
+        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
+        UniformBuffer ubo = {
+            .MVP = (proj * view * model).Transposed(),
+        };
+        memcpy(uboMapping, &ubo, sizeof(ubo));
+    };
+
+    const auto drawFrame = [
         &device,
         &swapchain,
         &recordCommandBuffer,
         &framesInFlight,
         &graphicsQueue,
         &presentQueue,
-        &camera,
-        frameIndex = 0,
-        st = Stopwatch(),
-        &framebufferResized // mutable
-    ]() mutable { // Draw frame
-        const auto& currentFrame = framesInFlight[frameIndex];
+        &updateUniforms
+    ](float time, float dt, size_t frameIndex) {
+        bool framebufferResized = false;
+        const auto& currentFrame = framesInFlight[frameIndex % maxFramesInFlight];
         (void) device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
         vk::Result res;
         uint32_t imageIndex;
@@ -1331,7 +1362,7 @@ int main() {
             std::tie(res, imageIndex) = device->acquireNextImageKHR(swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
         } catch (const vk::OutOfDateKHRError& e) {
             framebufferResized = true;
-            return;
+            return framebufferResized;
         }
         if (res == vk::Result::eSuboptimalKHR) {
             // This is not an error, which means that
@@ -1340,27 +1371,7 @@ int main() {
             framebufferResized = true;
         }
         device->resetFences(currentFrame.inFlightFence.get());
-        [&st, &swapchain, &currentFrame, &camera] {
-            float time = st.ping() / 1000;
-            // Transform transform = {
-            //     .position = {0, 0, 0},
-            //     .rotation = Quaternion::Euler(Vector3(time/7, time/5, time) * 3.5)
-            // };
-            // Matrix4 model = transform.Matrix() * Vector3(0, 0, -0.25).TranslationMatrix();
-            Transform transform = {
-                .position = {0, 0, 0},
-                .rotation = Quaternion::Euler(time/3, time/2, time),
-            };
-            Matrix4 model = transform.Matrix();
-            Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-            float aspect = (float) swapchain.info.imageExtent.width / swapchain.info.imageExtent.height;
-            Matrix4 proj = Transform::PerspectiveProjection(30, aspect, {0.1, 10}) * Transform::y_flip;
-            // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
-            UniformBuffer ubo = {
-                .MVP = (proj * view * model).Transposed(),
-            };
-            memcpy(currentFrame.uniformBufferMapping, &ubo, sizeof(ubo));
-        }();
+        updateUniforms(currentFrame.uniformBufferMapping, time, dt);
         recordCommandBuffer(currentFrame.commandBuffer, swapchain.framebuffers[imageIndex], currentFrame.descriptorSet);
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
         graphicsQueue.submit(vk::SubmitInfo {
@@ -1387,40 +1398,38 @@ int main() {
         if (res == vk::Result::eSuboptimalKHR) {
             framebufferResized = true;
         }
-        frameIndex = (frameIndex + 1) % maxFramesInFlight;
+        return framebufferResized;
     };
 
     // Main loop
-    [&window, &drawFrame, &framebufferResized, &device, &recreateSwapchainUnique, &camera] {
+    [&window, &processInput, &drawFrame, &device, &recreateSwapchainUnique] {
         FrameCounter frameCounter;
-        Stopwatch benchStopwatch;
+        const Stopwatch globalTime;
         while (!glfwWindowShouldClose(window.get())) {
             glfwPollEvents();
             const float dt = frameCounter.deltaTime / 1000;
-            camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(window.get()) * 3 * dt);
-            camera.position += camera.rotation.Rotate(input::get_move(window.get()) * 0.75 * dt);
-            drawFrame();
+            processInput(dt);
+            const bool framebufferResized = drawFrame(globalTime.ping() / 1000, dt, frameCounter.frameCount);
             frameCounter.tick();
             if (frameCounter.frameCount == 0) {
-                const double t = benchStopwatch.ping() / 1000;
+                const double t = globalTime.ping() / 1000;
                 const double fc = frameCounter.frameCount;
                 prn_raw(t, " s total, ", t/fc*1000, " ms avg (", fc/t, " fps)");
                 break;
             }
             if (framebufferResized) {
                 prn("Framebuffer resized");
-                { // Wait until window is not minimized
-                    int w, h;
-                    glfwGetFramebufferSize(window.get(), &w, &h);
+                int w, h;
+                glfwGetFramebufferSize(window.get(), &w, &h);
+                if (w == 0 || h == 0) {
+                    prn("Window is minimized, waiting...");
                     while (w == 0 || h == 0) {
-                        prn("Window is minimized, waiting...");
                         glfwWaitEvents();
                         glfwGetFramebufferSize(window.get(), &w, &h);
                     }
                 }
                 device->waitIdle();
                 recreateSwapchainUnique();
-                framebufferResized = false;
             }
         }
     }();
