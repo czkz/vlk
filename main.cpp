@@ -18,16 +18,6 @@
 #include "input.h"
 #include "load_obj.h"
 
-struct ImageAttachment {
-    vk::UniqueImage image;
-    vk::UniqueDeviceMemory deviceMemory;
-    vk::UniqueImageView imageView;
-};
-
-struct Texture : public ImageAttachment {
-    vk::UniqueSampler sampler;
-};
-
 struct FrameInFlight {
     vk::UniqueCommandBuffer commandBuffer;
     vk::UniqueSemaphore imageAvailableSemaphore;
@@ -35,39 +25,15 @@ struct FrameInFlight {
     vk::UniqueFence inFlightFence;
 };
 
-struct Material {
-    vk::UniqueDescriptorSetLayout descriptorSetLayout;
-    static constexpr auto descriptorPoolSizes = std::to_array({
-        vk::DescriptorPoolSize {
-            .type = vk::DescriptorType::eUniformBuffer,
-            .descriptorCount = 1,
-        },
-        vk::DescriptorPoolSize {
-            .type = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
-        },
-    });
-    static constexpr auto descriptorSetLayoutBindings = std::to_array({
-        vk::DescriptorSetLayoutBinding {
-            .binding = 0,
-            .descriptorType = vk::DescriptorType::eUniformBuffer,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eVertex,
-            .pImmutableSamplers = nullptr,
-        },
-        vk::DescriptorSetLayoutBinding {
-            .binding = 1,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment,
-            .pImmutableSamplers = nullptr,
-        },
-    });
-};
-
 struct Pipeline {
     vk::UniquePipelineLayout pipelineLayout;
     vk::UniquePipeline pipeline;
+};
+
+struct ImageAttachment {
+    vk::UniqueImage image;
+    vk::UniqueDeviceMemory deviceMemory;
+    vk::UniqueImageView imageView;
 };
 
 struct Renderer {
@@ -430,51 +396,6 @@ struct Renderer {
         commandBuffer.end();
         return localImage;
     }
-    auto createDeviceLocalTextureUnique(std::string_view path, vk::Format format) const {
-        const int channels = std::map<vk::Format, int> {
-            {vk::Format::eR8Srgb,       1},
-            {vk::Format::eR8G8Srgb,     2},
-            {vk::Format::eR8G8B8Srgb,   3},
-            {vk::Format::eR8G8B8A8Srgb, 4},
-        }[format];
-        const auto img = load_image(path, channels);
-        Texture ret;
-        const uint32_t mipLevels = floor(log2(std::max(img.w, img.h))) + 1;
-        std::tie(ret.image, ret.deviceMemory) = createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels);
-        ret.imageView = device->createImageViewUnique({
-            .flags = {},
-            .image = ret.image.get(),
-            .viewType = vk::ImageViewType::e2D,
-            .format = format,
-            .components = {},
-            .subresourceRange = {
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel = 0,
-                .levelCount = mipLevels,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        });
-        ret.sampler = device->createSamplerUnique({
-            .flags = {},
-            .magFilter = vk::Filter::eLinear,
-            .minFilter = vk::Filter::eLinear,
-            .mipmapMode = vk::SamplerMipmapMode::eLinear,
-            .addressModeU = vk::SamplerAddressMode::eRepeat,
-            .addressModeV = vk::SamplerAddressMode::eRepeat,
-            .addressModeW = vk::SamplerAddressMode::eRepeat,
-            .mipLodBias = 0,
-            .anisotropyEnable = props.maxAnisotropy != 0.0,
-            .maxAnisotropy = props.maxAnisotropy,
-            .compareEnable = VK_FALSE,
-            .compareOp = {},
-            .minLod = 0,
-            .maxLod = vk::LodClampNone,
-            .borderColor = {},
-            .unnormalizedCoordinates = false,
-        });
-        return ret;
-    }
     auto createImageAttachmentUnique(
         const vk::ImageCreateInfo& createInfo,
         vk::MemoryPropertyFlags memoryProperties,
@@ -519,6 +440,13 @@ struct Renderer {
             .pSpecializationInfo = nullptr,
         };
         return createInfo;
+    }
+    auto createDescriptorSetLayoutUnique(std::span<const vk::DescriptorSetLayoutBinding> bindings) const {
+        return device->createDescriptorSetLayoutUnique({
+            .flags = {},
+            .bindingCount = (uint32_t) bindings.size(),
+            .pBindings = bindings.data(),
+        });
     }
 
     void recreateSwapchainUnique() {
@@ -688,111 +616,11 @@ struct Renderer {
     }
 
 public:
-    struct Vertex {
-        Vector3 pos;
-        Vector2 uv;
-        constexpr bool operator==(const Vertex&) const = default;
-    };
-    static constexpr vk::VertexInputBindingDescription bindingDescription = {
-        .binding = 0,
-        .stride = sizeof(Vertex),
-        .inputRate = vk::VertexInputRate::eVertex,
-    };
-    static constexpr auto attributeDescriptions = std::to_array({
-        vk::VertexInputAttributeDescription {
-            .location = 0,
-            .binding = 0,
-            .format = vk::Format::eR32G32B32Sfloat,
-            .offset = offsetof(Vertex, pos),
-        },
-        vk::VertexInputAttributeDescription {
-            .location = 1,
-            .binding = 0,
-            .format = vk::Format::eR32G32Sfloat,
-            .offset = offsetof(Vertex, uv),
-        },
-    });
-    struct Model {
-        std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
-        std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
-        size_t nVertices;
-        size_t nIndices;
-    };
-    struct UniformBuffer {
-        alignas(16) Matrix4 MVP;
-    };
-
-    struct Renderable {
-        const Model* model;
-        const Texture* texture;
-        std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> uniformBuffer;
-        vk::UniqueDescriptorSet descriptorSet;
-        void* uniformBufferMapping;
-    };
-
-    auto makeModel(const char* path) const {
-        const auto [vertices, indices] = load_obj<Vertex>(path);
-        return Model {
-            .vertexBuffer = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
-            .indexBuffer = createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
-            .nVertices = vertices.size(),
-            .nIndices = indices.size(),
-        };
-        // const auto texture = createDeviceLocalTextureUnique("textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
-    };
-
-    auto makeRenderable(const Model* model, const Texture* texture, const Material& material) const {
-        Renderable ret;
-        ret.model = model;
-        ret.texture = texture;
-        ret.uniformBuffer = createBufferUnique(sizeof(UniformBuffer), vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-        ret.descriptorSet = std::move(device->allocateDescriptorSetsUnique({
-            .descriptorPool = descriptorPool.get(),
-            .descriptorSetCount = 1,
-            .pSetLayouts = &material.descriptorSetLayout.get(),
-        })[0]);
-        ret.uniformBufferMapping = device->mapMemory(ret.uniformBuffer.second.get(), 0, sizeof(UniformBuffer), {});
-        vk::DescriptorBufferInfo bufferInfo = {
-            .buffer = ret.uniformBuffer.first.get(),
-            .offset = 0,
-            .range = vk::WholeSize,
-        };
-        vk::DescriptorImageInfo imageInfo = {
-            .sampler = ret.texture->sampler.get(),
-            .imageView = ret.texture->imageView.get(),
-            .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-        };
-        device->updateDescriptorSets({
-            vk::WriteDescriptorSet {
-                .dstSet = ret.descriptorSet.get(),
-                .dstBinding = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eUniformBuffer,
-                .pImageInfo = nullptr,
-                .pBufferInfo = &bufferInfo,
-                .pTexelBufferView = nullptr,
-            },
-            vk::WriteDescriptorSet {
-                .dstSet = ret.descriptorSet.get(),
-                .dstBinding = 1,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-                .pImageInfo = &imageInfo,
-                .pBufferInfo = nullptr,
-                .pTexelBufferView = nullptr,
-            },
-        }, nullptr);
-        return ret;
-    };
-
-
     struct RenderableInfo {
         vk::Buffer vertexBuffer;
         vk::Buffer indexBuffer;
         size_t nIndices;
-        vk::DescriptorSet descriptorSet;
+        std::vector<vk::DescriptorSet> descriptorSets;
     };
 
     struct DrawInfo {
@@ -839,7 +667,7 @@ public:
         for (const auto& renderable : renderables) {
             commandBuffer->bindVertexBuffers(0, {renderable.vertexBuffer}, {0});
             commandBuffer->bindIndexBuffer(renderable.indexBuffer, 0, vk::IndexType::eUint32);
-            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, drawInfo.pipelineLayout, 0, renderable.descriptorSet, nullptr);
+            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, drawInfo.pipelineLayout, 0, renderable.descriptorSets, nullptr);
             commandBuffer->drawIndexed(renderable.nIndices, 1, 0, 0, 0);
         }
         commandBuffer->endRenderPass();
@@ -848,23 +676,144 @@ public:
 
 };
 
+struct Model {
+    std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
+    std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
+    size_t nVertices;
+    size_t nIndices;
+};
+Model makeModel(const Renderer& r, const char* path) {
+    const auto [vertices, indices] = load_obj(path);
+    return Model {
+        .vertexBuffer = r.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
+        .indexBuffer = r.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
+        .nVertices = vertices.size(),
+        .nIndices = indices.size(),
+    };
+}
+
+struct Texture : public ImageAttachment {
+    vk::UniqueSampler sampler;
+};
+Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format) {
+    const int channels = std::map<vk::Format, int> {
+        {vk::Format::eR8Srgb,       1},
+        {vk::Format::eR8G8Srgb,     2},
+        {vk::Format::eR8G8B8Srgb,   3},
+        {vk::Format::eR8G8B8A8Srgb, 4},
+    }[format];
+    const auto img = load_image(path, channels);
+    Texture ret;
+    const uint32_t mipLevels = floor(log2(std::max(img.w, img.h))) + 1;
+    std::tie(ret.image, ret.deviceMemory) = r.createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels);
+    ret.imageView = r.device->createImageViewUnique({
+        .flags = {},
+        .image = ret.image.get(),
+        .viewType = vk::ImageViewType::e2D,
+        .format = format,
+        .components = {},
+        .subresourceRange = {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = mipLevels,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    });
+    ret.sampler = r.device->createSamplerUnique({
+        .flags = {},
+        .magFilter = vk::Filter::eLinear,
+        .minFilter = vk::Filter::eLinear,
+        .mipmapMode = vk::SamplerMipmapMode::eLinear,
+        .addressModeU = vk::SamplerAddressMode::eRepeat,
+        .addressModeV = vk::SamplerAddressMode::eRepeat,
+        .addressModeW = vk::SamplerAddressMode::eRepeat,
+        .mipLodBias = 0,
+        .anisotropyEnable = r.props.maxAnisotropy != 0.0,
+        .maxAnisotropy = r.props.maxAnisotropy,
+        .compareEnable = VK_FALSE,
+        .compareOp = {},
+        .minLod = 0,
+        .maxLod = vk::LodClampNone,
+        .borderColor = {},
+        .unnormalizedCoordinates = false,
+    });
+    return ret;
+}
+
+std::vector<vk::DescriptorPoolSize> genPoolSizes(std::span<const vk::DescriptorSetLayoutBinding> bindings) {
+    std::map<vk::DescriptorType, uint32_t> poolSizes;
+    for (const auto& e : bindings) {
+        poolSizes[e.descriptorType]++;
+    }
+    std::vector<vk::DescriptorPoolSize> ret;
+    ret.reserve(poolSizes.size());
+    for (const auto& [type, count] : poolSizes) {
+        ret.push_back({
+            .type = type,
+            .descriptorCount = count,
+        });
+    }
+    return ret;
+}
+
+vk::UniqueDescriptorPool makeDescriptorPool(const Renderer& r, std::span<const vk::DescriptorPoolSize> poolSizes, size_t count) {
+    std::vector<vk::DescriptorPoolSize> poolSizesVec;
+    if (count != 1) {
+        poolSizesVec.reserve(poolSizes.size());
+        std::ranges::copy(poolSizes, std::back_inserter(poolSizesVec));
+        for (auto& e : poolSizesVec) {
+            e.descriptorCount *= count;
+        }
+    }
+    return r.device->createDescriptorPoolUnique({
+        .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+        .maxSets = (uint32_t) count,
+        .poolSizeCount = (uint32_t) poolSizes.size(),
+        .pPoolSizes = count == 1 ? poolSizes.data() : poolSizesVec.data(),
+    });
+}
 
 Pipeline initPipeline(
     const Renderer& r,
-    const Material& m,
+    std::span<const vk::DescriptorSetLayout> descriptorSetLayouts,
     const vk::UniqueRenderPass& renderPass,
     uint32_t subpass
 ) {
     Pipeline p;
     p.pipelineLayout = r.device->createPipelineLayoutUnique({
         .flags = {},
-        .setLayoutCount = 1,
-        .pSetLayouts = &m.descriptorSetLayout.get(),
+        .setLayoutCount = (uint32_t) descriptorSetLayouts.size(),
+        .pSetLayouts = descriptorSetLayouts.data(),
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = nullptr,
     });
     const auto vertShader = r.createShaderModuleUnique("shaders/triangle.vert.spv");
     const auto fragShader = r.createShaderModuleUnique("shaders/triangle.frag.spv");
+    struct Vertex {
+        Vector3 pos;
+        Vector2 uv;
+        constexpr bool operator==(const Vertex&) const = default;
+    };
+    static constexpr vk::VertexInputBindingDescription bindingDescription = {
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = vk::VertexInputRate::eVertex,
+    };
+    static constexpr auto attributeDescriptions = std::to_array({
+        vk::VertexInputAttributeDescription {
+            .location = 0,
+            .binding = 0,
+            .format = vk::Format::eR32G32B32Sfloat,
+            .offset = offsetof(Vertex, pos),
+        },
+        vk::VertexInputAttributeDescription {
+            .location = 1,
+            .binding = 0,
+            .format = vk::Format::eR32G32Sfloat,
+            .offset = offsetof(Vertex, uv),
+        },
+    });
     p.pipeline = [&] {
         const auto shaderStages = std::to_array({
             r.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
@@ -873,9 +822,9 @@ Pipeline initPipeline(
         vk::PipelineVertexInputStateCreateInfo vertexInputState = {
             .flags = {},
             .vertexBindingDescriptionCount = 1,
-            .pVertexBindingDescriptions = &Renderer::bindingDescription,
-            .vertexAttributeDescriptionCount = (uint32_t) Renderer::attributeDescriptions.size(),
-            .pVertexAttributeDescriptions = Renderer::attributeDescriptions.data(),
+            .pVertexBindingDescriptions = &bindingDescription,
+            .vertexAttributeDescriptionCount = (uint32_t) attributeDescriptions.size(),
+            .pVertexAttributeDescriptions = attributeDescriptions.data(),
         };
         vk::PipelineInputAssemblyStateCreateInfo inputAssemblyState = {
             .flags = {},
@@ -1358,27 +1307,131 @@ Renderer initRenderer() {
     return r;
 }
 
+struct TypedDescriptorPool {
+    const Renderer* r;
+    vk::UniqueDescriptorSetLayout descriptorSetLayout;
+    vk::UniqueDescriptorPool descriptorPool;
+    std::vector<vk::UniqueDescriptorSet> alloc(uint32_t n) const {
+        return r->device->allocateDescriptorSetsUnique({
+            .descriptorPool = descriptorPool.get(),
+            .descriptorSetCount = n,
+            .pSetLayouts = std::vector(n, descriptorSetLayout.get()).data(),
+        });
+    }
+    vk::UniqueDescriptorSet alloc() const {
+        return std::move(r->device->allocateDescriptorSetsUnique({
+            .descriptorPool = descriptorPool.get(),
+            .descriptorSetCount = 1,
+            .pSetLayouts = &descriptorSetLayout.get(),
+        })[0]);
+    }
+};
+
+TypedDescriptorPool makeTypedDescriptorPool(
+    const Renderer& r,
+    std::span<const vk::DescriptorSetLayoutBinding> materialBindings,
+    size_t count
+) {
+    return TypedDescriptorPool {
+        .r = &r,
+        .descriptorSetLayout = r.createDescriptorSetLayoutUnique(materialBindings),
+        .descriptorPool = makeDescriptorPool(r, genPoolSizes(materialBindings), count),
+    };
+}
+
+struct MappedBuffer {
+    std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> buffer;
+    void* mapping;
+};
+
+MappedBuffer makeMappedBuffer(const Renderer& r, uint32_t size, vk::BufferUsageFlags usage) {
+    MappedBuffer ret;
+    ret.buffer = r.createBufferUnique(size, usage, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    ret.mapping = r.device->mapMemory(ret.buffer.second.get(), 0, size, {});
+    return ret;
+}
+
+std::vector<MappedBuffer> makeMappedBuffers(const Renderer& r, uint32_t size, vk::BufferUsageFlags usage, size_t count) {
+    std::vector<MappedBuffer> ret;
+    ret.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        ret.push_back(makeMappedBuffer(r, size, usage));
+    }
+    return ret;
+}
+
 int main() {
     auto r = initRenderer();
 
-    const auto cubeModel = r.makeModel("models/cube.obj");
-    const auto cubeTexture = r.createDeviceLocalTextureUnique("textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
-    const Material cubeMaterial = {
-        .descriptorSetLayout = r.device->createDescriptorSetLayoutUnique({
-            .flags = {},
-            .bindingCount = Material::descriptorSetLayoutBindings.size(),
-            .pBindings = Material::descriptorSetLayoutBindings.data(),
-        }),
+    constexpr size_t nObjects = 5;
+    const auto materialDescriptorPool = makeTypedDescriptorPool(r, std::to_array({
+        vk::DescriptorSetLayoutBinding {
+            .binding = 0,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eFragment,
+            .pImmutableSamplers = nullptr,
+        },
+    }), 1);
+    const auto instanceDescriptorPool = makeTypedDescriptorPool(r, std::to_array({
+        vk::DescriptorSetLayoutBinding {
+            .binding = 0,
+            .descriptorType = vk::DescriptorType::eUniformBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eVertex,
+            .pImmutableSamplers = nullptr,
+        },
+    }), nObjects);
+
+    const auto graphicsPipeline = initPipeline(r, std::to_array({materialDescriptorPool.descriptorSetLayout.get(), instanceDescriptorPool.descriptorSetLayout.get()}), r.renderPass, 0);
+
+    const auto cubeModel = makeModel(r, "models/cube.obj");
+
+    const auto cubeTexture = makeTexture(r, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
+    const auto materialDescriptorSet = materialDescriptorPool.alloc();
+    r.device->updateDescriptorSets({
+        vk::WriteDescriptorSet {
+            .dstSet = materialDescriptorSet.get(),
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = std::to_array({vk::DescriptorImageInfo {
+                .sampler = cubeTexture.sampler.get(),
+                .imageView = cubeTexture.imageView.get(),
+                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            }}).data(),
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        },
+    }, nullptr);
+
+    struct InstanceUboData {
+        alignas(16) Matrix4 MVP;
     };
-
-    const auto graphicsPipeline = initPipeline(r, cubeMaterial, r.renderPass, 0);
-
-    std::vector<Renderer::Renderable> renderables (2);
-    for (auto& e : renderables) {
-        e = r.makeRenderable(&cubeModel, &cubeTexture, cubeMaterial);
+    const auto instanceDescriptorSets = instanceDescriptorPool.alloc(nObjects);
+    std::vector<MappedBuffer> instanceUBOs (nObjects);
+    for (size_t i = 0; i < nObjects; i++) {
+        instanceUBOs[i] = makeMappedBuffer(r, sizeof(InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
+        r.device->updateDescriptorSets({
+            vk::WriteDescriptorSet {
+                .dstSet = instanceDescriptorSets[i].get(),
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .pImageInfo = nullptr,
+                .pBufferInfo = std::to_array({vk::DescriptorBufferInfo {
+                    .buffer = instanceUBOs[i].buffer.first.get(),
+                    .offset = 0,
+                    .range = vk::WholeSize,
+                }}).data(),
+                .pTexelBufferView = nullptr,
+            },
+        }, nullptr);
     }
 
-    std::vector<Transform> transforms (renderables.size());
+    std::vector<Transform> transforms (nObjects);
     for (size_t i = 0; i < transforms.size(); i++) {
         transforms[i] = {
             .position = {i * 2.0f, 0, 0},
@@ -1404,13 +1457,13 @@ int main() {
         },
     });
 
-    std::vector<Renderer::RenderableInfo> renderableInfo (renderables.size());
+    std::vector<Renderer::RenderableInfo> renderableInfo (nObjects);
     for (size_t i = 0; i < renderableInfo.size(); i++) {
         renderableInfo[i] = Renderer::RenderableInfo {
             .vertexBuffer = cubeModel.vertexBuffer.first.get(),
             .indexBuffer = cubeModel.indexBuffer.first.get(),
             .nIndices = cubeModel.nIndices,
-            .descriptorSet = renderables[i].descriptorSet.get(),
+            .descriptorSets = {materialDescriptorSet.get(), instanceDescriptorSets[i].get()},
         };
     }
 
@@ -1427,7 +1480,7 @@ int main() {
         float aspect = (float) r.swapchain.info.imageExtent.width / r.swapchain.info.imageExtent.height;
         Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10}) * Transform::y_flip;
         // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
-        Renderer::UniformBuffer ubo = {
+        InstanceUboData ubo = {
             .MVP = (proj * view * model).Transposed(),
         };
         memcpy(dst, &ubo, sizeof(ubo));
@@ -1502,8 +1555,8 @@ int main() {
             const float dt = frameCounter.deltaTime / 1000;
             const float time = globalTime.ping() / 1000;
             processInput(dt);
-            for (size_t i = 0; i < transforms.size(); i++){
-                writeUbo(renderables[i].uniformBufferMapping, transforms[i]);
+            for (size_t i = 0; i < nObjects; i++){
+                writeUbo(instanceUBOs[i].mapping, transforms[i]);
             }
             const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
             frameCounter.tick();
@@ -1526,6 +1579,7 @@ int main() {
                 }
                 r.device->waitIdle();
                 r.recreateSwapchainUnique();
+                r.recreateFramebuffersUnique();
             }
         }
     }();

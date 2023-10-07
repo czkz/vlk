@@ -2,9 +2,14 @@
 #include <unordered_map>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
+#include <Vector.h>
 
-template <typename Vertex>
-auto load_obj(std::string_view path) {
+inline auto load_obj(std::string_view path) {
+    struct Vertex {
+        Vector3 pos;
+        Vector2 uv;
+        constexpr bool operator==(const Vertex&) const = default;
+    };
     std::pair<std::vector<Vertex>, std::vector<uint32_t>> ret;
     auto hash = [](const Vertex& v) {
         std::size_t seed = 5;

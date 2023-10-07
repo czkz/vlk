@@ -4,7 +4,7 @@ layout (location = 1) in vec2 in_uv;
 
 layout(location = 0) out vec2 out_uv;
 
-layout(binding = 0) uniform UniformBufferObject {
+layout(set = 1, binding = 0) uniform UniformBufferObject {
     mat4 MVP;
 } ubo;
 
