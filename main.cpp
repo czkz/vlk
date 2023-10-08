@@ -18,25 +18,13 @@
 #include "input.h"
 #include "load_obj.h"
 
-struct FrameInFlight {
-    vk::UniqueCommandBuffer commandBuffer;
-    vk::UniqueSemaphore imageAvailableSemaphore;
-    vk::UniqueSemaphore renderFinishedSemaphore;
-    vk::UniqueFence inFlightFence;
-};
-
-struct Pipeline {
-    vk::UniquePipelineLayout pipelineLayout;
-    vk::UniquePipeline pipeline;
-};
-
 struct ImageAttachment {
     vk::UniqueImage image;
     vk::UniqueDeviceMemory deviceMemory;
     vk::UniqueImageView imageView;
 };
 
-struct Renderer {
+struct GraphicsContext {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window = {nullptr, glfwDestroyWindow};
     vk::UniqueInstance instance;
     vk::UniqueSurfaceKHR surface;
@@ -71,6 +59,12 @@ struct Renderer {
     vk::UniqueCommandPool commandPool;
     vk::UniqueDescriptorPool descriptorPool;
 
+    struct FrameInFlight {
+        vk::UniqueCommandBuffer commandBuffer;
+        vk::UniqueSemaphore imageAvailableSemaphore;
+        vk::UniqueSemaphore renderFinishedSemaphore;
+        vk::UniqueFence inFlightFence;
+    };
     static constexpr uint32_t maxFramesInFlight = 1;
     std::array<FrameInFlight, maxFramesInFlight> framesInFlight;
 
@@ -448,6 +442,23 @@ struct Renderer {
             .pBindings = bindings.data(),
         });
     }
+    vk::UniqueDescriptorPool createDescriptorPoolUnique(std::span<const vk::DescriptorPoolSize> poolSizes, size_t count) const {
+        std::vector<vk::DescriptorPoolSize> poolSizesVec;
+        if (count != 1) {
+            poolSizesVec.reserve(poolSizes.size());
+            std::ranges::copy(poolSizes, std::back_inserter(poolSizesVec));
+            for (auto& e : poolSizesVec) {
+                e.descriptorCount *= count;
+            }
+        }
+        return device->createDescriptorPoolUnique({
+            .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+            .maxSets = (uint32_t) count,
+            .poolSizeCount = (uint32_t) poolSizes.size(),
+            .pPoolSizes = count == 1 ? poolSizes.data() : poolSizesVec.data(),
+        });
+    }
+
 
     void recreateSwapchainUnique() {
         swapchain.info = [&] {
@@ -675,18 +686,401 @@ public:
     }
 
 };
+GraphicsContext makeGraphicsContext() {
+    glfwInit();
+    GraphicsContext vlk;
 
-struct Model {
+    // Create window
+    vlk.window = [w = 800, h = 600] {
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        // glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        auto ptr = glfwCreateWindow(w, h, "Vulkan", nullptr, nullptr);
+        return std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)>(ptr, glfwDestroyWindow);
+    }();
+
+    // Create Vulkan instance
+    vlk.instance = [] {
+        // List of required instance layers
+        const auto requiredInstanceLayers = std::to_array({"VK_LAYER_KHRONOS_validation"});
+        // const std::array<const char*, 0> requiredInstanceLayers;
+
+        // Check layer support
+        [&requiredInstanceLayers] {
+            const auto availableInstanceLayers = vk::enumerateInstanceLayerProperties();
+
+            prn("Available layers:");
+            for (const auto& e : availableInstanceLayers) { prn('\t', std::string_view(e.layerName)); }
+
+            for (const auto& name : requiredInstanceLayers) {
+                if (!std::ranges::any_of(availableInstanceLayers, [name](const auto& e) { return std::string_view(e.layerName) == name; })) {
+                    throw ex::runtime(fmt("layer", name, "not available"));
+                }
+            }
+        }();
+
+        // Generate a list of required instance extensions
+        const auto glfwInstanceExtensions = [] {
+            uint32_t glfwExtensionCount = 0;
+            const char** glfwExtensionsRaw;
+            glfwExtensionsRaw = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+            return std::span<const char* const>(glfwExtensionsRaw, glfwExtensionCount);
+        }();
+        const auto requiredInstanceExtensions = glfwInstanceExtensions;
+
+        // Check extension support
+        [&requiredInstanceExtensions] {
+            const auto availableInstanceExtensions = vk::enumerateInstanceExtensionProperties();
+
+            prn("Available extensions:");
+            for (const auto& e : availableInstanceExtensions) { prn('\t', std::string_view(e.extensionName)); }
+
+            for (const auto& name : requiredInstanceExtensions) {
+                if (!std::ranges::any_of(availableInstanceExtensions, [name](const auto& e) { return std::string_view(e.extensionName) == name; })) {
+                    throw ex::runtime(fmt("extension", name, "not available"));
+                }
+            }
+        }();
+
+        // Create instance
+        return [&requiredInstanceLayers, &requiredInstanceExtensions] {
+            const vk::ApplicationInfo appInfo = {
+                .pApplicationName = "Vulkan",
+                .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+                .pEngineName = "No Engine",
+                .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+                .apiVersion = VK_API_VERSION_1_0,
+            };
+            return vk::createInstanceUnique({
+                .flags = {},
+                .pApplicationInfo = &appInfo,
+                .enabledLayerCount = (uint32_t) requiredInstanceLayers.size(),
+                .ppEnabledLayerNames = requiredInstanceLayers.data(),
+                .enabledExtensionCount = (uint32_t) requiredInstanceExtensions.size(),
+                .ppEnabledExtensionNames = requiredInstanceExtensions.data(),
+            });
+        }();
+    }();
+
+    // Create window surface
+    vlk.surface = [&] {
+        VkSurfaceKHR ret;
+        exwrap(glfwCreateWindowSurface(vlk.instance.get(), vlk.window.get(), nullptr, &ret));
+        return vk::UniqueSurfaceKHR(ret, vlk.instance.get());
+    }();
+
+    // List of required device extensions
+    constexpr auto requiredDeviceExtensions = std::to_array({
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    });
+
+    // Pick physical device
+    vlk.physicalDevice = [&] {
+        // Get a list of available devices
+        const auto availableDevices = vlk.instance->enumeratePhysicalDevices();
+        if (availableDevices.size() == 0) {
+            throw ex::runtime("couldn't find devices with Vulkan support");
+        }
+
+        // Print available devices
+        [&availableDevices] {
+            prn("Available physical devices:");
+            for (const auto& device : availableDevices) {
+                const auto properties = device.getProperties();
+                const auto features = device.getFeatures();
+                constexpr auto types = std::to_array({
+                    "Other",
+                    "Integrated GPU",
+                    "Discrete GPU",
+                    "Virtual GPU",
+                    "CPU",
+                });
+                prn("\t", std::string_view(properties.deviceName));
+                prn("\t\t", "Type:", types[static_cast<size_t>(properties.deviceType)]);
+                prn("\t\t", "API:", properties.apiVersion);
+                prn("\t\t", "Framebuffer dimensions:", properties.limits.maxFramebufferWidth, "x", properties.limits.maxFramebufferHeight);
+                prn("\t\t", "Geometry shader supported:", (bool) features.geometryShader);
+                prn("\t\t", "Tesselation shader supported:", (bool) features.tessellationShader);
+            }
+        }();
+
+        // Get a list of suitable devices
+        const auto isSuitable = [&](const vk::PhysicalDevice& device) {
+            const bool deviceSupportsExtensions = [&device, &extensions = requiredDeviceExtensions] {
+                const auto availableExtensions = device.enumerateDeviceExtensionProperties();
+                for (const auto& name : extensions) {
+                    if (!std::ranges::any_of(availableExtensions, [name](const auto& e) { return std::string_view(e.extensionName) == name; })) {
+                        return false;
+                    }
+                }
+                return true;
+            }();
+            const auto queueFamilies = device.getQueueFamilyProperties();
+            const bool hasGraphicsQueueFamily = [&] {
+                for (uint32_t i = 0; i < queueFamilies.size(); i++) {
+                    if (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics) {
+                        return true;
+                    }
+                }
+                return false;
+            }();
+            const bool hasPresentQueueFamily = [&] {
+                for (uint32_t i = 0; i < queueFamilies.size(); i++) {
+                    if (device.getSurfaceSupportKHR(i, vlk.surface.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }();
+            return
+                deviceSupportsExtensions &&
+                hasGraphicsQueueFamily &&
+                hasPresentQueueFamily &&
+                device.getSurfaceFormatsKHR(vlk.surface.get()).size() > 0 &&
+                device.getSurfacePresentModesKHR(vlk.surface.get()).size() > 0;
+        };
+
+        const auto suitableDevices = [&availableDevices, &isSuitable] {
+            std::vector<vk::PhysicalDevice> ret;
+            std::ranges::copy_if(availableDevices, std::back_inserter(ret), isSuitable);
+            return ret;
+        }();
+        if (suitableDevices.empty()) {
+            throw ex::runtime("couldn't find a suitable device");
+        }
+
+        prn("Suitable physical devices:");
+        for (const auto& device : suitableDevices) {
+            prn("\t", std::string_view(device.getProperties().deviceName));
+        }
+
+        // Pick best
+        return [&suitableDevices] {
+            const auto compare = [](const vk::PhysicalDevice& a, const vk::PhysicalDevice& b) {
+                using t = vk::PhysicalDeviceType;
+                std::map<t, int> typeToPriority {
+                    {t::eDiscreteGpu,   0},
+                    {t::eOther,         1},
+                    {t::eIntegratedGpu, 2},
+                    {t::eVirtualGpu,    3},
+                };
+                int p0 = typeToPriority[a.getProperties().deviceType];
+                int p1 = typeToPriority[b.getProperties().deviceType];
+                auto m0 = a.getMemoryProperties().memoryHeaps.at(0).size;
+                auto m1 = b.getMemoryProperties().memoryHeaps.at(0).size;
+                if (p0 != p1) { return p0 < p1; }
+                return m0 >= m1;
+            };
+            return *std::ranges::min_element(suitableDevices, compare);
+        }();
+    }();
+    prn("Chosen physical device:", std::string_view(vlk.physicalDevice.getProperties().deviceName));
+
+    // Get some device properties and limits
+    vlk.props.deviceFeatures = vlk.physicalDevice.getFeatures();
+    vlk.props.deviceProperties = vlk.physicalDevice.getProperties();
+    vlk.props.maxAnisotropy = vlk.props.deviceFeatures.samplerAnisotropy ? vlk.props.deviceProperties.limits.maxSamplerAnisotropy : 0;
+    vlk.props.maxSampleCount = [&limits = vlk.props.deviceProperties.limits] {
+        const auto i = static_cast<uint32_t>(limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts);
+        return static_cast<vk::SampleCountFlagBits>(std::bit_floor(i));
+    }();
+    vlk.props.queueFamilyProperties = vlk.physicalDevice.getQueueFamilyProperties();
+    prn("Anisotropic filtering:", vlk.props.maxAnisotropy ? fmt_raw(static_cast<uint32_t>(vlk.props.maxAnisotropy), "x") : "disabled");
+    prn("Multisampling:", fmt_raw(static_cast<uint32_t>(vlk.props.maxSampleCount), "x"));
+
+
+    // Get queue family indices for chosen device
+    vlk.props.graphicsQueueFamily = [&] {
+        for (uint32_t i = 0; i < vlk.props.queueFamilyProperties.size(); i++) {
+            if (!(vlk.props.queueFamilyProperties[i].queueFlags & vk::QueueFlagBits::eGraphics)) { continue; }
+            return i;
+        }
+        assert(false);
+    }();
+    vlk.props.presentQueueFamily = [&] {
+        if (vlk.physicalDevice.getSurfaceSupportKHR(vlk.props.graphicsQueueFamily, vlk.surface.get())) {
+            return vlk.props.graphicsQueueFamily;
+        }
+        const auto len = vlk.physicalDevice.getQueueFamilyProperties().size();
+        for (uint32_t i = 0; i < len; i++) {
+            if (vlk.physicalDevice.getSurfaceSupportKHR(i, vlk.surface.get())) {
+                return i;
+            }
+        }
+        assert(false);
+    }();
+    vlk.props.uniqueQueueFamilies = {vlk.props.graphicsQueueFamily, vlk.props.presentQueueFamily};
+
+    // Create logical device
+    vlk.device = [&] {
+        const float queuePriority = 1.0f;
+        std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
+        for (const auto& e : vlk.props.uniqueQueueFamilies) {
+            queueCreateInfos.push_back({
+                .flags = {},
+                .queueFamilyIndex = e,
+                .queueCount = 1,
+                .pQueuePriorities = &queuePriority,
+            });
+        }
+        const vk::PhysicalDeviceFeatures usedFeatures {
+            .samplerAnisotropy = vlk.props.deviceFeatures.samplerAnisotropy,
+        };
+        return vlk.physicalDevice.createDeviceUnique({
+            .flags = {},
+            .queueCreateInfoCount = (uint32_t) queueCreateInfos.size(),
+            .pQueueCreateInfos = queueCreateInfos.data(),
+            .enabledExtensionCount = (uint32_t) requiredDeviceExtensions.size(), // Device extensions, not instance extensions
+            .ppEnabledExtensionNames = requiredDeviceExtensions.data(),
+            .pEnabledFeatures = &usedFeatures,
+        });
+    }();
+
+    vlk.graphicsQueue = vlk.device->getQueue(vlk.props.graphicsQueueFamily, 0);
+    vlk.presentQueue = vlk.device->getQueue(vlk.props.presentQueueFamily, 0);
+
+    vlk.commandPoolUtil = vlk.device->createCommandPoolUnique({
+        .flags = vk::CommandPoolCreateFlagBits::eTransient,
+        .queueFamilyIndex = vlk.props.graphicsQueueFamily,
+    });
+
+    vlk.recreateSwapchainUnique();
+
+    vlk.renderPass = [&] {
+        vk::AttachmentDescription colorAttachmentDesc = {
+            .flags = {},
+            .format = vlk.swapchain.info.imageFormat,
+            .samples = vlk.props.maxSampleCount,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eDontCare,
+            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+            .initialLayout = vk::ImageLayout::eUndefined,
+            .finalLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        };
+        vk::AttachmentDescription depthAttachmentDesc = {
+            .flags = {},
+            .format = vk::Format::eD32Sfloat,
+            .samples = vlk.props.maxSampleCount,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eDontCare,
+            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+            .initialLayout = vk::ImageLayout::eUndefined,
+            .finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+        };
+        vk::AttachmentDescription colorResolveDesc = {
+            .flags = {},
+            .format = vlk.swapchain.info.imageFormat,
+            .samples = vk::SampleCountFlagBits::e1,
+            .loadOp = vk::AttachmentLoadOp::eDontCare,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+            .initialLayout = vk::ImageLayout::eUndefined,
+            .finalLayout = vk::ImageLayout::ePresentSrcKHR,
+        };
+        vk::AttachmentReference colorAttachmentRef = {
+            .attachment = 0,
+            .layout = vk::ImageLayout::eColorAttachmentOptimal,
+        };
+        vk::AttachmentReference depthAttachmentRef = {
+            .attachment = 1,
+            .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+        };
+        vk::AttachmentReference colorResolveRef = {
+            .attachment = 2,
+            .layout = vk::ImageLayout::eColorAttachmentOptimal,
+        };
+        vk::SubpassDescription subpass = {
+            .flags = {},
+            .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
+            .inputAttachmentCount = 0,
+            .pInputAttachments = nullptr,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &colorAttachmentRef,
+            .pResolveAttachments = &colorResolveRef,
+            .pDepthStencilAttachment = &depthAttachmentRef,
+            .preserveAttachmentCount = 0,
+            .pPreserveAttachments = nullptr,
+        };
+        using stage = vk::PipelineStageFlagBits;
+        vk::SubpassDependency extenralDependency = {
+            .srcSubpass = VK_SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = stage::eColorAttachmentOutput | stage::eEarlyFragmentTests | stage::eLateFragmentTests,
+            .dstStageMask = stage::eColorAttachmentOutput | stage::eEarlyFragmentTests | stage::eLateFragmentTests,
+            .srcAccessMask = vk::AccessFlagBits::eNone,
+            .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
+            .dependencyFlags = {},
+        };
+        const auto attachmentDescriptions = std::to_array({colorAttachmentDesc, depthAttachmentDesc, colorResolveDesc});
+        vk::RenderPassCreateInfo createInfo = {
+            .flags = {},
+            .attachmentCount = attachmentDescriptions.size(),
+            .pAttachments = attachmentDescriptions.data(),
+            .subpassCount = 1,
+            .pSubpasses = &subpass,
+            .dependencyCount = 1,
+            .pDependencies = &extenralDependency,
+        };
+        return vlk.device->createRenderPassUnique(createInfo);
+    }();
+
+    vlk.recreateFramebuffersUnique();
+
+    vlk.commandPool = vlk.device->createCommandPoolUnique({
+        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+        .queueFamilyIndex = vlk.props.graphicsQueueFamily,
+    });
+
+    vlk.descriptorPool = [&] {
+        const auto poolSizes = std::to_array({
+            vk::DescriptorPoolSize {
+                .type = vk::DescriptorType::eUniformBuffer,
+                .descriptorCount = 2,
+            },
+            vk::DescriptorPoolSize {
+                .type = vk::DescriptorType::eCombinedImageSampler,
+                .descriptorCount = 2,
+            },
+        });
+        return vlk.device->createDescriptorPoolUnique({
+            .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+            .maxSets = 2,
+            .poolSizeCount = poolSizes.size(),
+            .pPoolSizes = poolSizes.data(),
+        });
+    }();
+
+    for (auto& f : vlk.framesInFlight) {
+        f = {
+            .commandBuffer = std::move(vlk.device->allocateCommandBuffersUnique({
+                .commandPool = vlk.commandPool.get(),
+                .level = vk::CommandBufferLevel::ePrimary,
+                .commandBufferCount = 1,
+            })[0]),
+            .imageAvailableSemaphore = vlk.device->createSemaphoreUnique({}),
+            .renderFinishedSemaphore = vlk.device->createSemaphoreUnique({}),
+            .inFlightFence = vlk.device->createFenceUnique({
+                .flags = vk::FenceCreateFlagBits::eSignaled,
+            }),
+        };
+    }
+
+    return vlk;
+}
+
+struct Mesh {
     std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
     std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
     size_t nVertices;
     size_t nIndices;
 };
-Model makeModel(const Renderer& r, const char* path) {
+Mesh makeMesh(const GraphicsContext& vlk, const char* path) {
     const auto [vertices, indices] = load_obj(path);
-    return Model {
-        .vertexBuffer = r.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
-        .indexBuffer = r.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
+    return Mesh {
+        .vertexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
+        .indexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
         .nVertices = vertices.size(),
         .nIndices = indices.size(),
     };
@@ -695,7 +1089,7 @@ Model makeModel(const Renderer& r, const char* path) {
 struct Texture : public ImageAttachment {
     vk::UniqueSampler sampler;
 };
-Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format) {
+Texture makeTexture(const GraphicsContext& vlk, std::string_view path, vk::Format format) {
     const int channels = std::map<vk::Format, int> {
         {vk::Format::eR8Srgb,       1},
         {vk::Format::eR8G8Srgb,     2},
@@ -705,8 +1099,8 @@ Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format)
     const auto img = load_image(path, channels);
     Texture ret;
     const uint32_t mipLevels = floor(log2(std::max(img.w, img.h))) + 1;
-    std::tie(ret.image, ret.deviceMemory) = r.createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels);
-    ret.imageView = r.device->createImageViewUnique({
+    std::tie(ret.image, ret.deviceMemory) = vlk.createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels);
+    ret.imageView = vlk.device->createImageViewUnique({
         .flags = {},
         .image = ret.image.get(),
         .viewType = vk::ImageViewType::e2D,
@@ -720,7 +1114,7 @@ Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format)
             .layerCount = 1,
         },
     });
-    ret.sampler = r.device->createSamplerUnique({
+    ret.sampler = vlk.device->createSamplerUnique({
         .flags = {},
         .magFilter = vk::Filter::eLinear,
         .minFilter = vk::Filter::eLinear,
@@ -729,8 +1123,8 @@ Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format)
         .addressModeV = vk::SamplerAddressMode::eRepeat,
         .addressModeW = vk::SamplerAddressMode::eRepeat,
         .mipLodBias = 0,
-        .anisotropyEnable = r.props.maxAnisotropy != 0.0,
-        .maxAnisotropy = r.props.maxAnisotropy,
+        .anisotropyEnable = vlk.props.maxAnisotropy != 0.0,
+        .maxAnisotropy = vlk.props.maxAnisotropy,
         .compareEnable = VK_FALSE,
         .compareOp = {},
         .minLod = 0,
@@ -741,55 +1135,26 @@ Texture makeTexture(const Renderer& r, std::string_view path, vk::Format format)
     return ret;
 }
 
-std::vector<vk::DescriptorPoolSize> genPoolSizes(std::span<const vk::DescriptorSetLayoutBinding> bindings) {
-    std::map<vk::DescriptorType, uint32_t> poolSizes;
-    for (const auto& e : bindings) {
-        poolSizes[e.descriptorType]++;
-    }
-    std::vector<vk::DescriptorPoolSize> ret;
-    ret.reserve(poolSizes.size());
-    for (const auto& [type, count] : poolSizes) {
-        ret.push_back({
-            .type = type,
-            .descriptorCount = count,
-        });
-    }
-    return ret;
-}
-
-vk::UniqueDescriptorPool makeDescriptorPool(const Renderer& r, std::span<const vk::DescriptorPoolSize> poolSizes, size_t count) {
-    std::vector<vk::DescriptorPoolSize> poolSizesVec;
-    if (count != 1) {
-        poolSizesVec.reserve(poolSizes.size());
-        std::ranges::copy(poolSizes, std::back_inserter(poolSizesVec));
-        for (auto& e : poolSizesVec) {
-            e.descriptorCount *= count;
-        }
-    }
-    return r.device->createDescriptorPoolUnique({
-        .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-        .maxSets = (uint32_t) count,
-        .poolSizeCount = (uint32_t) poolSizes.size(),
-        .pPoolSizes = count == 1 ? poolSizes.data() : poolSizesVec.data(),
-    });
-}
-
-Pipeline initPipeline(
-    const Renderer& r,
+struct Pipeline {
+    vk::UniquePipelineLayout pipelineLayout;
+    vk::UniquePipeline pipeline;
+};
+Pipeline makeGraphicsPipeline(
+    const GraphicsContext& vlk,
     std::span<const vk::DescriptorSetLayout> descriptorSetLayouts,
     const vk::UniqueRenderPass& renderPass,
     uint32_t subpass
 ) {
     Pipeline p;
-    p.pipelineLayout = r.device->createPipelineLayoutUnique({
+    p.pipelineLayout = vlk.device->createPipelineLayoutUnique({
         .flags = {},
         .setLayoutCount = (uint32_t) descriptorSetLayouts.size(),
         .pSetLayouts = descriptorSetLayouts.data(),
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = nullptr,
     });
-    const auto vertShader = r.createShaderModuleUnique("shaders/triangle.vert.spv");
-    const auto fragShader = r.createShaderModuleUnique("shaders/triangle.frag.spv");
+    const auto vertShader = vlk.createShaderModuleUnique("shaders/triangle.vert.spv");
+    const auto fragShader = vlk.createShaderModuleUnique("shaders/triangle.frag.spv");
     struct Vertex {
         Vector3 pos;
         Vector2 uv;
@@ -816,8 +1181,8 @@ Pipeline initPipeline(
     });
     p.pipeline = [&] {
         const auto shaderStages = std::to_array({
-            r.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
-            r.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eFragment, fragShader),
+            vlk.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
+            vlk.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eFragment, fragShader),
         });
         vk::PipelineVertexInputStateCreateInfo vertexInputState = {
             .flags = {},
@@ -853,7 +1218,7 @@ Pipeline initPipeline(
         };
         vk::PipelineMultisampleStateCreateInfo multisampleState = {
             .flags = {},
-            .rasterizationSamples = r.props.maxSampleCount,
+            .rasterizationSamples = vlk.props.maxSampleCount,
             .sampleShadingEnable = VK_FALSE,
             .minSampleShading = 1,
             .pSampleMask = nullptr,
@@ -918,424 +1283,54 @@ Pipeline initPipeline(
             .basePipelineHandle = VK_NULL_HANDLE,
             .basePipelineIndex = -1,
         };
-        return r.device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
+        return vlk.device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
     }();
     return p;
 }
 
-Renderer initRenderer() {
-    glfwInit();
-    Renderer r;
-
-    // Create window
-    r.window = [w = 800, h = 600] {
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        // glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-        auto ptr = glfwCreateWindow(w, h, "Vulkan", nullptr, nullptr);
-        return std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)>(ptr, glfwDestroyWindow);
-    }();
-
-    // Create Vulkan instance
-    r.instance = [] {
-        // List of required instance layers
-        const auto requiredInstanceLayers = std::to_array({"VK_LAYER_KHRONOS_validation"});
-        // const std::array<const char*, 0> requiredInstanceLayers;
-
-        // Check layer support
-        [&requiredInstanceLayers] {
-            const auto availableInstanceLayers = vk::enumerateInstanceLayerProperties();
-
-            prn("Available layers:");
-            for (const auto& e : availableInstanceLayers) { prn('\t', std::string_view(e.layerName)); }
-
-            for (const auto& name : requiredInstanceLayers) {
-                if (!std::ranges::any_of(availableInstanceLayers, [name](const auto& e) { return std::string_view(e.layerName) == name; })) {
-                    throw ex::runtime(fmt("layer", name, "not available"));
-                }
-            }
-        }();
-
-        // Generate a list of required instance extensions
-        const auto glfwInstanceExtensions = [] {
-            uint32_t glfwExtensionCount = 0;
-            const char** glfwExtensionsRaw;
-            glfwExtensionsRaw = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-            return std::span<const char* const>(glfwExtensionsRaw, glfwExtensionCount);
-        }();
-        const auto requiredInstanceExtensions = glfwInstanceExtensions;
-
-        // Check extension support
-        [&requiredInstanceExtensions] {
-            const auto availableInstanceExtensions = vk::enumerateInstanceExtensionProperties();
-
-            prn("Available extensions:");
-            for (const auto& e : availableInstanceExtensions) { prn('\t', std::string_view(e.extensionName)); }
-
-            for (const auto& name : requiredInstanceExtensions) {
-                if (!std::ranges::any_of(availableInstanceExtensions, [name](const auto& e) { return std::string_view(e.extensionName) == name; })) {
-                    throw ex::runtime(fmt("extension", name, "not available"));
-                }
-            }
-        }();
-
-        // Create instance
-        return [&requiredInstanceLayers, &requiredInstanceExtensions] {
-            const vk::ApplicationInfo appInfo = {
-                .pApplicationName = "Vulkan",
-                .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
-                .pEngineName = "No Engine",
-                .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-                .apiVersion = VK_API_VERSION_1_0,
-            };
-            return vk::createInstanceUnique({
-                .flags = {},
-                .pApplicationInfo = &appInfo,
-                .enabledLayerCount = (uint32_t) requiredInstanceLayers.size(),
-                .ppEnabledLayerNames = requiredInstanceLayers.data(),
-                .enabledExtensionCount = (uint32_t) requiredInstanceExtensions.size(),
-                .ppEnabledExtensionNames = requiredInstanceExtensions.data(),
-            });
-        }();
-    }();
-
-    // Create window surface
-    r.surface = [&] {
-        VkSurfaceKHR ret;
-        exwrap(glfwCreateWindowSurface(r.instance.get(), r.window.get(), nullptr, &ret));
-        return vk::UniqueSurfaceKHR(ret, r.instance.get());
-    }();
-
-    // List of required device extensions
-    constexpr auto requiredDeviceExtensions = std::to_array({
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    });
-
-    // Pick physical device
-    r.physicalDevice = [&] {
-        // Get a list of available devices
-        const auto availableDevices = r.instance->enumeratePhysicalDevices();
-        if (availableDevices.size() == 0) {
-            throw ex::runtime("couldn't find devices with Vulkan support");
-        }
-
-        // Print available devices
-        [&availableDevices] {
-            prn("Available physical devices:");
-            for (const auto& device : availableDevices) {
-                const auto properties = device.getProperties();
-                const auto features = device.getFeatures();
-                constexpr auto types = std::to_array({
-                    "Other",
-                    "Integrated GPU",
-                    "Discrete GPU",
-                    "Virtual GPU",
-                    "CPU",
-                });
-                prn("\t", std::string_view(properties.deviceName));
-                prn("\t\t", "Type:", types[static_cast<size_t>(properties.deviceType)]);
-                prn("\t\t", "API:", properties.apiVersion);
-                prn("\t\t", "Framebuffer dimensions:", properties.limits.maxFramebufferWidth, "x", properties.limits.maxFramebufferHeight);
-                prn("\t\t", "Geometry shader supported:", (bool) features.geometryShader);
-                prn("\t\t", "Tesselation shader supported:", (bool) features.tessellationShader);
-            }
-        }();
-
-        // Get a list of suitable devices
-        const auto isSuitable = [&](const vk::PhysicalDevice& device) {
-            const bool deviceSupportsExtensions = [&device, &extensions = requiredDeviceExtensions] {
-                const auto availableExtensions = device.enumerateDeviceExtensionProperties();
-                for (const auto& name : extensions) {
-                    if (!std::ranges::any_of(availableExtensions, [name](const auto& e) { return std::string_view(e.extensionName) == name; })) {
-                        return false;
-                    }
-                }
-                return true;
-            }();
-            const auto queueFamilies = device.getQueueFamilyProperties();
-            const bool hasGraphicsQueueFamily = [&] {
-                for (uint32_t i = 0; i < queueFamilies.size(); i++) {
-                    if (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics) {
-                        return true;
-                    }
-                }
-                return false;
-            }();
-            const bool hasPresentQueueFamily = [&] {
-                for (uint32_t i = 0; i < queueFamilies.size(); i++) {
-                    if (device.getSurfaceSupportKHR(i, r.surface.get())) {
-                        return true;
-                    }
-                }
-                return false;
-            }();
-            return
-                deviceSupportsExtensions &&
-                hasGraphicsQueueFamily &&
-                hasPresentQueueFamily &&
-                device.getSurfaceFormatsKHR(r.surface.get()).size() > 0 &&
-                device.getSurfacePresentModesKHR(r.surface.get()).size() > 0;
-        };
-
-        const auto suitableDevices = [&availableDevices, &isSuitable] {
-            std::vector<vk::PhysicalDevice> ret;
-            std::ranges::copy_if(availableDevices, std::back_inserter(ret), isSuitable);
-            return ret;
-        }();
-        if (suitableDevices.empty()) {
-            throw ex::runtime("couldn't find a suitable device");
-        }
-
-        prn("Suitable physical devices:");
-        for (const auto& device : suitableDevices) {
-            prn("\t", std::string_view(device.getProperties().deviceName));
-        }
-
-        // Pick best
-        return [&suitableDevices] {
-            const auto compare = [](const vk::PhysicalDevice& a, const vk::PhysicalDevice& b) {
-                using t = vk::PhysicalDeviceType;
-                std::map<t, int> typeToPriority {
-                    {t::eDiscreteGpu,   0},
-                    {t::eOther,         1},
-                    {t::eIntegratedGpu, 2},
-                    {t::eVirtualGpu,    3},
-                };
-                int p0 = typeToPriority[a.getProperties().deviceType];
-                int p1 = typeToPriority[b.getProperties().deviceType];
-                auto m0 = a.getMemoryProperties().memoryHeaps.at(0).size;
-                auto m1 = b.getMemoryProperties().memoryHeaps.at(0).size;
-                if (p0 != p1) { return p0 < p1; }
-                return m0 >= m1;
-            };
-            return *std::ranges::min_element(suitableDevices, compare);
-        }();
-    }();
-    prn("Chosen physical device:", std::string_view(r.physicalDevice.getProperties().deviceName));
-
-    // Get some device properties and limits
-    r.props.deviceFeatures = r.physicalDevice.getFeatures();
-    r.props.deviceProperties = r.physicalDevice.getProperties();
-    r.props.maxAnisotropy = r.props.deviceFeatures.samplerAnisotropy ? r.props.deviceProperties.limits.maxSamplerAnisotropy : 0;
-    r.props.maxSampleCount = [&limits = r.props.deviceProperties.limits] {
-        const auto i = static_cast<uint32_t>(limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts);
-        return static_cast<vk::SampleCountFlagBits>(std::bit_floor(i));
-    }();
-    r.props.queueFamilyProperties = r.physicalDevice.getQueueFamilyProperties();
-    prn("Anisotropic filtering:", r.props.maxAnisotropy ? fmt_raw(static_cast<uint32_t>(r.props.maxAnisotropy), "x") : "disabled");
-    prn("Multisampling:", fmt_raw(static_cast<uint32_t>(r.props.maxSampleCount), "x"));
-
-
-    // Get queue family indices for chosen device
-    r.props.graphicsQueueFamily = [&] {
-        for (uint32_t i = 0; i < r.props.queueFamilyProperties.size(); i++) {
-            if (!(r.props.queueFamilyProperties[i].queueFlags & vk::QueueFlagBits::eGraphics)) { continue; }
-            return i;
-        }
-        assert(false);
-    }();
-    r.props.presentQueueFamily = [&] {
-        if (r.physicalDevice.getSurfaceSupportKHR(r.props.graphicsQueueFamily, r.surface.get())) {
-            return r.props.graphicsQueueFamily;
-        }
-        const auto len = r.physicalDevice.getQueueFamilyProperties().size();
-        for (uint32_t i = 0; i < len; i++) {
-            if (r.physicalDevice.getSurfaceSupportKHR(i, r.surface.get())) {
-                return i;
-            }
-        }
-        assert(false);
-    }();
-    r.props.uniqueQueueFamilies = {r.props.graphicsQueueFamily, r.props.presentQueueFamily};
-
-    // Create logical device
-    r.device = [&] {
-        const float queuePriority = 1.0f;
-        std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
-        for (const auto& e : r.props.uniqueQueueFamilies) {
-            queueCreateInfos.push_back({
-                .flags = {},
-                .queueFamilyIndex = e,
-                .queueCount = 1,
-                .pQueuePriorities = &queuePriority,
-            });
-        }
-        const vk::PhysicalDeviceFeatures usedFeatures {
-            .samplerAnisotropy = r.props.deviceFeatures.samplerAnisotropy,
-        };
-        return r.physicalDevice.createDeviceUnique({
-            .flags = {},
-            .queueCreateInfoCount = (uint32_t) queueCreateInfos.size(),
-            .pQueueCreateInfos = queueCreateInfos.data(),
-            .enabledExtensionCount = (uint32_t) requiredDeviceExtensions.size(), // Device extensions, not instance extensions
-            .ppEnabledExtensionNames = requiredDeviceExtensions.data(),
-            .pEnabledFeatures = &usedFeatures,
-        });
-    }();
-
-    r.graphicsQueue = r.device->getQueue(r.props.graphicsQueueFamily, 0);
-    r.presentQueue = r.device->getQueue(r.props.presentQueueFamily, 0);
-
-    r.commandPoolUtil = r.device->createCommandPoolUnique({
-        .flags = vk::CommandPoolCreateFlagBits::eTransient,
-        .queueFamilyIndex = r.props.graphicsQueueFamily,
-    });
-
-    r.recreateSwapchainUnique();
-
-    r.renderPass = [&] {
-        vk::AttachmentDescription colorAttachmentDesc = {
-            .flags = {},
-            .format = r.swapchain.info.imageFormat,
-            .samples = r.props.maxSampleCount,
-            .loadOp = vk::AttachmentLoadOp::eClear,
-            .storeOp = vk::AttachmentStoreOp::eDontCare,
-            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
-            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
-            .initialLayout = vk::ImageLayout::eUndefined,
-            .finalLayout = vk::ImageLayout::eColorAttachmentOptimal,
-        };
-        vk::AttachmentDescription depthAttachmentDesc = {
-            .flags = {},
-            .format = vk::Format::eD32Sfloat,
-            .samples = r.props.maxSampleCount,
-            .loadOp = vk::AttachmentLoadOp::eClear,
-            .storeOp = vk::AttachmentStoreOp::eDontCare,
-            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
-            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
-            .initialLayout = vk::ImageLayout::eUndefined,
-            .finalLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
-        };
-        vk::AttachmentDescription colorResolveDesc = {
-            .flags = {},
-            .format = r.swapchain.info.imageFormat,
-            .samples = vk::SampleCountFlagBits::e1,
-            .loadOp = vk::AttachmentLoadOp::eDontCare,
-            .storeOp = vk::AttachmentStoreOp::eStore,
-            .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
-            .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
-            .initialLayout = vk::ImageLayout::eUndefined,
-            .finalLayout = vk::ImageLayout::ePresentSrcKHR,
-        };
-        vk::AttachmentReference colorAttachmentRef = {
-            .attachment = 0,
-            .layout = vk::ImageLayout::eColorAttachmentOptimal,
-        };
-        vk::AttachmentReference depthAttachmentRef = {
-            .attachment = 1,
-            .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
-        };
-        vk::AttachmentReference colorResolveRef = {
-            .attachment = 2,
-            .layout = vk::ImageLayout::eColorAttachmentOptimal,
-        };
-        vk::SubpassDescription subpass = {
-            .flags = {},
-            .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
-            .inputAttachmentCount = 0,
-            .pInputAttachments = nullptr,
-            .colorAttachmentCount = 1,
-            .pColorAttachments = &colorAttachmentRef,
-            .pResolveAttachments = &colorResolveRef,
-            .pDepthStencilAttachment = &depthAttachmentRef,
-            .preserveAttachmentCount = 0,
-            .pPreserveAttachments = nullptr,
-        };
-        using stage = vk::PipelineStageFlagBits;
-        vk::SubpassDependency extenralDependency = {
-            .srcSubpass = VK_SUBPASS_EXTERNAL,
-            .dstSubpass = 0,
-            .srcStageMask = stage::eColorAttachmentOutput | stage::eEarlyFragmentTests | stage::eLateFragmentTests,
-            .dstStageMask = stage::eColorAttachmentOutput | stage::eEarlyFragmentTests | stage::eLateFragmentTests,
-            .srcAccessMask = vk::AccessFlagBits::eNone,
-            .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
-            .dependencyFlags = {},
-        };
-        const auto attachmentDescriptions = std::to_array({colorAttachmentDesc, depthAttachmentDesc, colorResolveDesc});
-        vk::RenderPassCreateInfo createInfo = {
-            .flags = {},
-            .attachmentCount = attachmentDescriptions.size(),
-            .pAttachments = attachmentDescriptions.data(),
-            .subpassCount = 1,
-            .pSubpasses = &subpass,
-            .dependencyCount = 1,
-            .pDependencies = &extenralDependency,
-        };
-        return r.device->createRenderPassUnique(createInfo);
-    }();
-
-    r.recreateFramebuffersUnique();
-
-    r.commandPool = r.device->createCommandPoolUnique({
-        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-        .queueFamilyIndex = r.props.graphicsQueueFamily,
-    });
-
-    r.descriptorPool = [&] {
-        const auto poolSizes = std::to_array({
-            vk::DescriptorPoolSize {
-                .type = vk::DescriptorType::eUniformBuffer,
-                .descriptorCount = 2,
-            },
-            vk::DescriptorPoolSize {
-                .type = vk::DescriptorType::eCombinedImageSampler,
-                .descriptorCount = 2,
-            },
-        });
-        return r.device->createDescriptorPoolUnique({
-            .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-            .maxSets = 2,
-            .poolSizeCount = poolSizes.size(),
-            .pPoolSizes = poolSizes.data(),
-        });
-    }();
-
-    for (auto& f : r.framesInFlight) {
-        f = FrameInFlight {
-            .commandBuffer = std::move(r.device->allocateCommandBuffersUnique({
-                .commandPool = r.commandPool.get(),
-                .level = vk::CommandBufferLevel::ePrimary,
-                .commandBufferCount = 1,
-            })[0]),
-            .imageAvailableSemaphore = r.device->createSemaphoreUnique({}),
-            .renderFinishedSemaphore = r.device->createSemaphoreUnique({}),
-            .inFlightFence = r.device->createFenceUnique({
-                .flags = vk::FenceCreateFlagBits::eSignaled,
-            }),
-        };
-    }
-
-    return r;
-}
-
 struct TypedDescriptorPool {
-    const Renderer* r;
+    const GraphicsContext* vlk;
     vk::UniqueDescriptorSetLayout descriptorSetLayout;
     vk::UniqueDescriptorPool descriptorPool;
     std::vector<vk::UniqueDescriptorSet> alloc(uint32_t n) const {
-        return r->device->allocateDescriptorSetsUnique({
+        return vlk->device->allocateDescriptorSetsUnique({
             .descriptorPool = descriptorPool.get(),
             .descriptorSetCount = n,
             .pSetLayouts = std::vector(n, descriptorSetLayout.get()).data(),
         });
     }
     vk::UniqueDescriptorSet alloc() const {
-        return std::move(r->device->allocateDescriptorSetsUnique({
+        return std::move(vlk->device->allocateDescriptorSetsUnique({
             .descriptorPool = descriptorPool.get(),
             .descriptorSetCount = 1,
             .pSetLayouts = &descriptorSetLayout.get(),
         })[0]);
     }
 };
-
 TypedDescriptorPool makeTypedDescriptorPool(
-    const Renderer& r,
+    const GraphicsContext& vlk,
     std::span<const vk::DescriptorSetLayoutBinding> materialBindings,
     size_t count
 ) {
+    constexpr auto genPoolSizes = [](std::span<const vk::DescriptorSetLayoutBinding> bindings) {
+        std::map<vk::DescriptorType, uint32_t> poolSizes;
+        for (const auto& e : bindings) {
+            poolSizes[e.descriptorType]++;
+        }
+        std::vector<vk::DescriptorPoolSize> ret;
+        ret.reserve(poolSizes.size());
+        for (const auto& [type, count] : poolSizes) {
+            ret.push_back({
+                .type = type,
+                .descriptorCount = count,
+            });
+        }
+        return ret;
+    };
     return TypedDescriptorPool {
-        .r = &r,
-        .descriptorSetLayout = r.createDescriptorSetLayoutUnique(materialBindings),
-        .descriptorPool = makeDescriptorPool(r, genPoolSizes(materialBindings), count),
+        .vlk = &vlk,
+        .descriptorSetLayout = vlk.createDescriptorSetLayoutUnique(materialBindings),
+        .descriptorPool = vlk.createDescriptorPoolUnique(genPoolSizes(materialBindings), count),
     };
 }
 
@@ -1343,25 +1338,15 @@ struct MappedBuffer {
     std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> buffer;
     void* mapping;
 };
-
-MappedBuffer makeMappedBuffer(const Renderer& r, uint32_t size, vk::BufferUsageFlags usage) {
+MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::BufferUsageFlags usage) {
     MappedBuffer ret;
-    ret.buffer = r.createBufferUnique(size, usage, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-    ret.mapping = r.device->mapMemory(ret.buffer.second.get(), 0, size, {});
-    return ret;
-}
-
-std::vector<MappedBuffer> makeMappedBuffers(const Renderer& r, uint32_t size, vk::BufferUsageFlags usage, size_t count) {
-    std::vector<MappedBuffer> ret;
-    ret.reserve(count);
-    for (size_t i = 0; i < count; i++) {
-        ret.push_back(makeMappedBuffer(r, size, usage));
-    }
+    ret.buffer = vlk.createBufferUnique(size, usage, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    ret.mapping = vlk.device->mapMemory(ret.buffer.second.get(), 0, size, {});
     return ret;
 }
 
 int main() {
-    auto r = initRenderer();
+    auto r = makeGraphicsContext();
 
     constexpr size_t nObjects = 5;
     const auto materialDescriptorPool = makeTypedDescriptorPool(r, std::to_array({
@@ -1383,9 +1368,9 @@ int main() {
         },
     }), nObjects);
 
-    const auto graphicsPipeline = initPipeline(r, std::to_array({materialDescriptorPool.descriptorSetLayout.get(), instanceDescriptorPool.descriptorSetLayout.get()}), r.renderPass, 0);
+    const auto graphicsPipeline = makeGraphicsPipeline(r, std::to_array({materialDescriptorPool.descriptorSetLayout.get(), instanceDescriptorPool.descriptorSetLayout.get()}), r.renderPass, 0);
 
-    const auto cubeModel = makeModel(r, "models/cube.obj");
+    const auto cubeMesh = makeMesh(r, "models/cube.obj");
 
     const auto cubeTexture = makeTexture(r, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
     const auto materialDescriptorSet = materialDescriptorPool.alloc();
@@ -1432,7 +1417,7 @@ int main() {
     }
 
     std::vector<Transform> transforms (nObjects);
-    for (size_t i = 0; i < transforms.size(); i++) {
+    for (size_t i = 0; i < nObjects; i++) {
         transforms[i] = {
             .position = {i * 2.0f, 0, 0},
             .rotation = Quaternion::Identity(),
@@ -1457,17 +1442,15 @@ int main() {
         },
     });
 
-    std::vector<Renderer::RenderableInfo> renderableInfo (nObjects);
-    for (size_t i = 0; i < renderableInfo.size(); i++) {
-        renderableInfo[i] = Renderer::RenderableInfo {
-            .vertexBuffer = cubeModel.vertexBuffer.first.get(),
-            .indexBuffer = cubeModel.indexBuffer.first.get(),
-            .nIndices = cubeModel.nIndices,
+    std::vector<GraphicsContext::RenderableInfo> renderableInfo (nObjects);
+    for (size_t i = 0; i < nObjects; i++) {
+        renderableInfo[i] = GraphicsContext::RenderableInfo {
+            .vertexBuffer = cubeMesh.vertexBuffer.first.get(),
+            .indexBuffer = cubeMesh.indexBuffer.first.get(),
+            .nIndices = cubeMesh.nIndices,
             .descriptorSets = {materialDescriptorSet.get(), instanceDescriptorSets[i].get()},
         };
     }
-
-    FrameInFlight currentFrame;
 
     const auto processInput = [&](float dt) {
         camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(r.window.get()) * 3 * dt);
@@ -1508,7 +1491,7 @@ int main() {
         r.device->resetFences(currentFrame.inFlightFence.get());
         r.drawCommands(
             currentFrame.commandBuffer,
-            Renderer::DrawInfo {
+            GraphicsContext::DrawInfo {
                 .renderPass = r.renderPass.get(),
                 .framebuffer = r.swapchain.framebuffers[imageIndex].get(),
                 .imageExtent = r.swapchain.info.imageExtent,
