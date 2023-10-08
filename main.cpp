@@ -1076,7 +1076,7 @@ struct Mesh {
     size_t nVertices;
     size_t nIndices;
 };
-Mesh makeMesh(const GraphicsContext& vlk, const char* path) {
+Mesh makeMesh(const GraphicsContext& vlk, std::string_view path) {
     const auto [vertices, indices] = load_obj(path);
     return Mesh {
         .vertexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
@@ -1345,11 +1345,21 @@ MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::Buf
     return ret;
 }
 
-int main() {
-    auto r = makeGraphicsContext();
-
-    constexpr size_t nObjects = 5;
-    const auto materialDescriptorPool = makeTypedDescriptorPool(r, std::to_array({
+struct Model {
+    Mesh mesh;
+    Texture texture;
+    TypedDescriptorPool materialDescriptorPool;
+    vk::UniqueDescriptorSet materialDescriptorSet;
+};
+Model makeModel(
+    const GraphicsContext& vlk,
+    std::string_view meshPath,
+    std::string_view texturePath
+) {
+    Model ret;
+    ret.mesh = makeMesh(vlk, meshPath);
+    ret.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
+    ret.materialDescriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
         vk::DescriptorSetLayoutBinding {
             .binding = 0,
             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
@@ -1358,7 +1368,88 @@ int main() {
             .pImmutableSamplers = nullptr,
         },
     }), 1);
-    const auto instanceDescriptorPool = makeTypedDescriptorPool(r, std::to_array({
+    ret.materialDescriptorSet = ret.materialDescriptorPool.alloc();
+    vlk.device->updateDescriptorSets({
+        vk::WriteDescriptorSet {
+            .dstSet = ret.materialDescriptorSet.get(),
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .pImageInfo = std::to_array({vk::DescriptorImageInfo {
+                .sampler = ret.texture.sampler.get(),
+                .imageView = ret.texture.imageView.get(),
+                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            }}).data(),
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        },
+    }, nullptr);
+    return ret;
+}
+
+struct Instance {
+    struct InstanceUboData {
+        alignas(16) Matrix4 MVP;
+    };
+    const Model* model;
+    Transform transform;
+    vk::UniqueDescriptorSet descriptorSet;
+    MappedBuffer ubo;
+    void updateUbo(const Transform& camera, vk::Extent2D imageExtent) const {
+        Matrix4 model = transform.Matrix();
+        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
+        float aspect = (float) imageExtent.width / imageExtent.height;
+        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10}) * Transform::y_flip;
+        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
+        InstanceUboData uboData = {
+            .MVP = (proj * view * model).Transposed(),
+        };
+        memcpy(ubo.mapping, &uboData, sizeof(uboData));
+    };
+};
+struct InstancePool {
+    const Model* model;
+    TypedDescriptorPool descriptorPool;
+    Instance alloc(Transform t) const {
+        Instance ret;
+        ret.model = model;
+        ret.transform = t;
+        ret.descriptorSet = descriptorPool.alloc();
+        ret.ubo = makeMappedBuffer(*descriptorPool.vlk, sizeof(Instance::InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
+        descriptorPool.vlk->device->updateDescriptorSets({
+            vk::WriteDescriptorSet {
+                .dstSet = ret.descriptorSet.get(),
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .pImageInfo = nullptr,
+                .pBufferInfo = std::to_array({vk::DescriptorBufferInfo {
+                    .buffer = ret.ubo.buffer.first.get(),
+                    .offset = 0,
+                    .range = vk::WholeSize,
+                }}).data(),
+                .pTexelBufferView = nullptr,
+            },
+        }, nullptr);
+        return ret;
+    }
+    Pipeline makePipeline(const vk::UniqueRenderPass& renderPass, uint32_t subpass) const {
+        return makeGraphicsPipeline(*descriptorPool.vlk, std::to_array({
+            model->materialDescriptorPool.descriptorSetLayout.get(),
+            descriptorPool.descriptorSetLayout.get()
+        }), renderPass, subpass);
+    }
+};
+InstancePool makeInstancePool(
+    const GraphicsContext& vlk,
+    const Model* model,
+    size_t nObjects
+) {
+    InstancePool ret;
+    ret.model = model;
+    ret.descriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
         vk::DescriptorSetLayoutBinding {
             .binding = 0,
             .descriptorType = vk::DescriptorType::eUniformBuffer,
@@ -1367,62 +1458,27 @@ int main() {
             .pImmutableSamplers = nullptr,
         },
     }), nObjects);
+    return ret;
+}
 
-    const auto graphicsPipeline = makeGraphicsPipeline(r, std::to_array({materialDescriptorPool.descriptorSetLayout.get(), instanceDescriptorPool.descriptorSetLayout.get()}), r.renderPass, 0);
 
-    const auto cubeMesh = makeMesh(r, "models/cube.obj");
+int main() {
+    auto vlk = makeGraphicsContext();
 
-    const auto cubeTexture = makeTexture(r, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
-    const auto materialDescriptorSet = materialDescriptorPool.alloc();
-    r.device->updateDescriptorSets({
-        vk::WriteDescriptorSet {
-            .dstSet = materialDescriptorSet.get(),
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = std::to_array({vk::DescriptorImageInfo {
-                .sampler = cubeTexture.sampler.get(),
-                .imageView = cubeTexture.imageView.get(),
-                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            }}).data(),
-            .pBufferInfo = nullptr,
-            .pTexelBufferView = nullptr,
-        },
-    }, nullptr);
+    constexpr size_t nObjects = 5;
 
-    struct InstanceUboData {
-        alignas(16) Matrix4 MVP;
-    };
-    const auto instanceDescriptorSets = instanceDescriptorPool.alloc(nObjects);
-    std::vector<MappedBuffer> instanceUBOs (nObjects);
+    const auto cubeModel = makeModel(vlk, "models/cube.obj", "textures/bricks.png");
+    const auto cubeInstancePool = makeInstancePool(vlk, &cubeModel, nObjects);
+    const auto graphicsPipeline = cubeInstancePool.makePipeline(vlk.renderPass, 0);
+
+    std::vector<Instance> cubeInstances;
+    cubeInstances.reserve(nObjects);
     for (size_t i = 0; i < nObjects; i++) {
-        instanceUBOs[i] = makeMappedBuffer(r, sizeof(InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
-        r.device->updateDescriptorSets({
-            vk::WriteDescriptorSet {
-                .dstSet = instanceDescriptorSets[i].get(),
-                .dstBinding = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eUniformBuffer,
-                .pImageInfo = nullptr,
-                .pBufferInfo = std::to_array({vk::DescriptorBufferInfo {
-                    .buffer = instanceUBOs[i].buffer.first.get(),
-                    .offset = 0,
-                    .range = vk::WholeSize,
-                }}).data(),
-                .pTexelBufferView = nullptr,
-            },
-        }, nullptr);
-    }
-
-    std::vector<Transform> transforms (nObjects);
-    for (size_t i = 0; i < nObjects; i++) {
-        transforms[i] = {
+        cubeInstances.push_back(cubeInstancePool.alloc({
             .position = {i * 2.0f, 0, 0},
             .rotation = Quaternion::Identity(),
             .scale = Vector3(1),
-        };
+        }));
     }
 
     auto camera = SpaceCamera({
@@ -1445,39 +1501,27 @@ int main() {
     std::vector<GraphicsContext::RenderableInfo> renderableInfo (nObjects);
     for (size_t i = 0; i < nObjects; i++) {
         renderableInfo[i] = GraphicsContext::RenderableInfo {
-            .vertexBuffer = cubeMesh.vertexBuffer.first.get(),
-            .indexBuffer = cubeMesh.indexBuffer.first.get(),
-            .nIndices = cubeMesh.nIndices,
-            .descriptorSets = {materialDescriptorSet.get(), instanceDescriptorSets[i].get()},
+            .vertexBuffer = cubeModel.mesh.vertexBuffer.first.get(),
+            .indexBuffer = cubeModel.mesh.indexBuffer.first.get(),
+            .nIndices = cubeModel.mesh.nIndices,
+            .descriptorSets = {cubeModel.materialDescriptorSet.get(), cubeInstances[i].descriptorSet.get()},
         };
     }
 
     const auto processInput = [&](float dt) {
-        camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(r.window.get()) * 3 * dt);
-        camera.position += camera.rotation.Rotate(input::get_move(r.window.get()) * 0.75 * dt);
-    };
-
-    const auto writeUbo = [&](void* dst, const Transform& transform) {
-        Matrix4 model = transform.Matrix();
-        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-        float aspect = (float) r.swapchain.info.imageExtent.width / r.swapchain.info.imageExtent.height;
-        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10}) * Transform::y_flip;
-        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
-        InstanceUboData ubo = {
-            .MVP = (proj * view * model).Transposed(),
-        };
-        memcpy(dst, &ubo, sizeof(ubo));
+        camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(vlk.window.get()) * 3 * dt);
+        camera.position += camera.rotation.Rotate(input::get_move(vlk.window.get()) * 0.75 * dt);
     };
 
     const auto drawFrame = [&](float time, float dt, size_t frameIndex) {
         (void) time, (void) dt;
         bool framebufferResized = false;
-        const auto& currentFrame = r.framesInFlight[frameIndex % r.maxFramesInFlight];
-        (void) r.device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
+        const auto& currentFrame = vlk.framesInFlight[frameIndex % vlk.maxFramesInFlight];
+        (void) vlk.device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
         vk::Result res;
         uint32_t imageIndex;
         try {
-            std::tie(res, imageIndex) = r.device->acquireNextImageKHR(r.swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
+            std::tie(res, imageIndex) = vlk.device->acquireNextImageKHR(vlk.swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
         } catch (const vk::OutOfDateKHRError& e) {
             framebufferResized = true;
             return framebufferResized;
@@ -1488,13 +1532,13 @@ int main() {
             // so we can't return without waiting on it
             framebufferResized = true;
         }
-        r.device->resetFences(currentFrame.inFlightFence.get());
-        r.drawCommands(
+        vlk.device->resetFences(currentFrame.inFlightFence.get());
+        vlk.drawCommands(
             currentFrame.commandBuffer,
             GraphicsContext::DrawInfo {
-                .renderPass = r.renderPass.get(),
-                .framebuffer = r.swapchain.framebuffers[imageIndex].get(),
-                .imageExtent = r.swapchain.info.imageExtent,
+                .renderPass = vlk.renderPass.get(),
+                .framebuffer = vlk.swapchain.framebuffers[imageIndex].get(),
+                .imageExtent = vlk.swapchain.info.imageExtent,
                 .graphicsPipeline = graphicsPipeline.pipeline.get(),
                 .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
                 .clearValues = clearColors,
@@ -1502,7 +1546,7 @@ int main() {
             renderableInfo
         );
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
-        r.graphicsQueue.submit(vk::SubmitInfo {
+        vlk.graphicsQueue.submit(vk::SubmitInfo {
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &currentFrame.imageAvailableSemaphore.get(),
             .pWaitDstStageMask = waitStages,
@@ -1512,11 +1556,11 @@ int main() {
             .pSignalSemaphores = &currentFrame.renderFinishedSemaphore.get(),
         }, currentFrame.inFlightFence.get());
         try {
-            res = r.presentQueue.presentKHR(vk::PresentInfoKHR {
+            res = vlk.presentQueue.presentKHR(vk::PresentInfoKHR {
                 .waitSemaphoreCount = 1,
                 .pWaitSemaphores = &currentFrame.renderFinishedSemaphore.get(),
                 .swapchainCount = 1,
-                .pSwapchains = &r.swapchain.swapchain.get(),
+                .pSwapchains = &vlk.swapchain.swapchain.get(),
                 .pImageIndices = &imageIndex,
                 .pResults = nullptr,
             });
@@ -1533,13 +1577,13 @@ int main() {
     [&] {
         FrameCounter frameCounter;
         const Stopwatch globalTime;
-        while (!glfwWindowShouldClose(r.window.get())) {
+        while (!glfwWindowShouldClose(vlk.window.get())) {
             glfwPollEvents();
             const float dt = frameCounter.deltaTime / 1000;
             const float time = globalTime.ping() / 1000;
             processInput(dt);
             for (size_t i = 0; i < nObjects; i++){
-                writeUbo(instanceUBOs[i].mapping, transforms[i]);
+                cubeInstances[i].updateUbo(camera, vlk.swapchain.info.imageExtent);
             }
             const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
             frameCounter.tick();
@@ -1552,19 +1596,19 @@ int main() {
             if (framebufferResized) {
                 prn("Framebuffer resized");
                 int w, h;
-                glfwGetFramebufferSize(r.window.get(), &w, &h);
+                glfwGetFramebufferSize(vlk.window.get(), &w, &h);
                 if (w == 0 || h == 0) {
                     prn("Window is minimized, waiting...");
                     while (w == 0 || h == 0) {
                         glfwWaitEvents();
-                        glfwGetFramebufferSize(r.window.get(), &w, &h);
+                        glfwGetFramebufferSize(vlk.window.get(), &w, &h);
                     }
                 }
-                r.device->waitIdle();
-                r.recreateSwapchainUnique();
-                r.recreateFramebuffersUnique();
+                vlk.device->waitIdle();
+                vlk.recreateSwapchainUnique();
+                vlk.recreateFramebuffersUnique();
             }
         }
     }();
-    r.device->waitIdle();
+    vlk.device->waitIdle();
 }
