@@ -18,6 +18,11 @@
 #include "input.h"
 #include "load_obj.h"
 
+template <std::ranges::input_range R, typename C>
+constexpr auto umembers(const R& a, auto C::*p) noexcept {
+    return std::views::transform(a, [=](const auto& e) { return (e.*p).get(); });
+}
+
 struct ImageAttachment {
     vk::UniqueImage image;
     vk::UniqueDeviceMemory deviceMemory;
@@ -625,66 +630,6 @@ struct GraphicsContext {
             }));
         }
     }
-
-public:
-    struct RenderableInfo {
-        vk::Buffer vertexBuffer;
-        vk::Buffer indexBuffer;
-        size_t nIndices;
-        std::vector<vk::DescriptorSet> descriptorSets;
-    };
-
-    struct DrawInfo {
-        vk::RenderPass renderPass;
-        vk::Framebuffer framebuffer;
-        vk::Extent2D imageExtent;
-        vk::Pipeline graphicsPipeline;
-        vk::PipelineLayout pipelineLayout;
-        std::span<const vk::ClearValue> clearValues;
-    };
-
-    auto drawCommands(
-        const vk::UniqueCommandBuffer& commandBuffer,
-        const DrawInfo& drawInfo,
-        std::vector<RenderableInfo> renderables
-    ) const {
-        commandBuffer->begin({
-            .flags = {},
-            .pInheritanceInfo = nullptr,
-        });
-        commandBuffer->beginRenderPass({
-            .renderPass = drawInfo.renderPass,
-            .framebuffer = drawInfo.framebuffer,
-            .renderArea = {
-                .offset = {0, 0},
-                .extent = drawInfo.imageExtent,
-            },
-            .clearValueCount = (uint32_t) drawInfo.clearValues.size(),
-            .pClearValues = drawInfo.clearValues.data(),
-        }, vk::SubpassContents::eInline);
-        commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, drawInfo.graphicsPipeline);
-        commandBuffer->setViewport(0, vk::Viewport {
-            .x = 0,
-            .y = 0,
-            .width = (float) drawInfo.imageExtent.width,
-            .height = (float) drawInfo.imageExtent.height,
-            .minDepth = 0,
-            .maxDepth = 1,
-        });
-        commandBuffer->setScissor(0, vk::Rect2D {
-            .offset = {0, 0},
-            .extent = drawInfo.imageExtent,
-        });
-        for (const auto& renderable : renderables) {
-            commandBuffer->bindVertexBuffers(0, {renderable.vertexBuffer}, {0});
-            commandBuffer->bindIndexBuffer(renderable.indexBuffer, 0, vk::IndexType::eUint32);
-            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, drawInfo.pipelineLayout, 0, renderable.descriptorSets, nullptr);
-            commandBuffer->drawIndexed(renderable.nIndices, 1, 0, 0, 0);
-        }
-        commandBuffer->endRenderPass();
-        commandBuffer->end();
-    }
-
 };
 GraphicsContext makeGraphicsContext() {
     glfwInit();
@@ -1075,6 +1020,7 @@ struct Mesh {
     std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
     size_t nVertices;
     size_t nIndices;
+    bool indexed;
 };
 Mesh makeMesh(const GraphicsContext& vlk, std::string_view path) {
     const auto [vertices, indices] = load_obj(path);
@@ -1083,6 +1029,7 @@ Mesh makeMesh(const GraphicsContext& vlk, std::string_view path) {
         .indexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
         .nVertices = vertices.size(),
         .nIndices = indices.size(),
+        .indexed = true,
     };
 }
 
@@ -1288,6 +1235,7 @@ Pipeline makeGraphicsPipeline(
     return p;
 }
 
+// Descriptor pool tied to a DescriptorSetLayout
 struct TypedDescriptorPool {
     const GraphicsContext* vlk;
     vk::UniqueDescriptorSetLayout descriptorSetLayout;
@@ -1345,6 +1293,7 @@ MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::Buf
     return ret;
 }
 
+// TODO detach material type and material instance from model
 struct Model {
     Mesh mesh;
     Texture texture;
@@ -1388,15 +1337,14 @@ Model makeModel(
     return ret;
 }
 
-struct Instance {
+struct ModelInstance {
     struct InstanceUboData {
         alignas(16) Matrix4 MVP;
     };
     const Model* model;
-    Transform transform;
     vk::UniqueDescriptorSet descriptorSet;
     MappedBuffer ubo;
-    void updateUbo(const Transform& camera, vk::Extent2D imageExtent) const {
+    void updateUbo(const Transform& transform, const Transform& camera, vk::Extent2D imageExtent) const {
         Matrix4 model = transform.Matrix();
         Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
         float aspect = (float) imageExtent.width / imageExtent.height;
@@ -1408,15 +1356,14 @@ struct Instance {
         memcpy(ubo.mapping, &uboData, sizeof(uboData));
     };
 };
-struct InstancePool {
+struct ModelInstancePool {
     const Model* model;
     TypedDescriptorPool descriptorPool;
-    Instance alloc(Transform t) const {
-        Instance ret;
+    ModelInstance alloc() const {
+        ModelInstance ret;
         ret.model = model;
-        ret.transform = t;
         ret.descriptorSet = descriptorPool.alloc();
-        ret.ubo = makeMappedBuffer(*descriptorPool.vlk, sizeof(Instance::InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
+        ret.ubo = makeMappedBuffer(*descriptorPool.vlk, sizeof(ModelInstance::InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
         descriptorPool.vlk->device->updateDescriptorSets({
             vk::WriteDescriptorSet {
                 .dstSet = ret.descriptorSet.get(),
@@ -1435,6 +1382,14 @@ struct InstancePool {
         }, nullptr);
         return ret;
     }
+    std::vector<ModelInstance> alloc(uint32_t n) const {
+        std::vector<ModelInstance> ret;
+        ret.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            ret.push_back(alloc());
+        }
+        return ret;
+    }
     Pipeline makePipeline(const vk::UniqueRenderPass& renderPass, uint32_t subpass) const {
         return makeGraphicsPipeline(*descriptorPool.vlk, std::to_array({
             model->materialDescriptorPool.descriptorSetLayout.get(),
@@ -1442,12 +1397,12 @@ struct InstancePool {
         }), renderPass, subpass);
     }
 };
-InstancePool makeInstancePool(
+ModelInstancePool makeModelInstancePool(
     const GraphicsContext& vlk,
     const Model* model,
     size_t nObjects
 ) {
-    InstancePool ret;
+    ModelInstancePool ret;
     ret.model = model;
     ret.descriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
         vk::DescriptorSetLayoutBinding {
@@ -1461,6 +1416,70 @@ InstancePool makeInstancePool(
     return ret;
 }
 
+struct ForwardRenderer {
+    vk::RenderPass renderPass;
+    vk::Framebuffer framebuffer;
+    vk::Extent2D imageExtent;
+    vk::Pipeline graphicsPipeline;
+    vk::PipelineLayout pipelineLayout;
+    std::span<const vk::ClearValue> clearValues;
+
+    void begin(const vk::UniqueCommandBuffer& commandBuffer) {
+        commandBuffer->begin({
+            .flags = {},
+            .pInheritanceInfo = nullptr,
+        });
+        commandBuffer->beginRenderPass({
+            .renderPass = this->renderPass,
+            .framebuffer = this->framebuffer,
+            .renderArea = {
+                .offset = {0, 0},
+                .extent = this->imageExtent,
+            },
+            .clearValueCount = (uint32_t) this->clearValues.size(),
+            .pClearValues = this->clearValues.data(),
+        }, vk::SubpassContents::eInline);
+        commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, this->graphicsPipeline);
+        commandBuffer->setViewport(0, vk::Viewport {
+            .x = 0,
+            .y = 0,
+            .width = (float) this->imageExtent.width,
+            .height = (float) this->imageExtent.height,
+            .minDepth = 0,
+            .maxDepth = 1,
+        });
+        commandBuffer->setScissor(0, vk::Rect2D {
+            .offset = {0, 0},
+            .extent = this->imageExtent,
+        });
+    }
+
+    void render(
+        const vk::UniqueCommandBuffer& commandBuffer,
+        const Mesh& mesh,
+        const std::ranges::contiguous_range auto& descriptorSets,
+        const std::ranges::input_range auto& instanceDescriptorSets
+    ) {
+        commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer.first.get()}, {0});
+        if (mesh.indexed) {
+            commandBuffer->bindIndexBuffer(mesh.indexBuffer.first.get(), 0, vk::IndexType::eUint32);
+        }
+        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, descriptorSets, nullptr);
+        for (const auto& instanceDescriptorSet : instanceDescriptorSets) {
+            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, descriptorSets.size(), instanceDescriptorSet, nullptr);
+            if (mesh.indexed) {
+                commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
+            } else {
+                commandBuffer->draw(mesh.nVertices, 1, 0, 0);
+            }
+        }
+    }
+
+    void end(const vk::UniqueCommandBuffer& commandBuffer) {
+        commandBuffer->endRenderPass();
+        commandBuffer->end();
+    }
+};
 
 int main() {
     auto vlk = makeGraphicsContext();
@@ -1468,17 +1487,19 @@ int main() {
     constexpr size_t nObjects = 5;
 
     const auto cubeModel = makeModel(vlk, "models/cube.obj", "textures/bricks.png");
-    const auto cubeInstancePool = makeInstancePool(vlk, &cubeModel, nObjects);
-    const auto graphicsPipeline = cubeInstancePool.makePipeline(vlk.renderPass, 0);
+    const auto cubeModelInstancePool = makeModelInstancePool(vlk, &cubeModel, nObjects);
+    const auto graphicsPipeline = cubeModelInstancePool.makePipeline(vlk.renderPass, 0);
 
-    std::vector<Instance> cubeInstances;
-    cubeInstances.reserve(nObjects);
+    const auto cubeModelInstances = cubeModelInstancePool.alloc(nObjects);
+
+    std::vector<Transform> cubeTransforms;
+    cubeTransforms.reserve(nObjects);
     for (size_t i = 0; i < nObjects; i++) {
-        cubeInstances.push_back(cubeInstancePool.alloc({
+        cubeTransforms.push_back({
             .position = {i * 2.0f, 0, 0},
             .rotation = Quaternion::Identity(),
             .scale = Vector3(1),
-        }));
+        });
     }
 
     auto camera = SpaceCamera({
@@ -1497,16 +1518,6 @@ int main() {
             },
         },
     });
-
-    std::vector<GraphicsContext::RenderableInfo> renderableInfo (nObjects);
-    for (size_t i = 0; i < nObjects; i++) {
-        renderableInfo[i] = GraphicsContext::RenderableInfo {
-            .vertexBuffer = cubeModel.mesh.vertexBuffer.first.get(),
-            .indexBuffer = cubeModel.mesh.indexBuffer.first.get(),
-            .nIndices = cubeModel.mesh.nIndices,
-            .descriptorSets = {cubeModel.materialDescriptorSet.get(), cubeInstances[i].descriptorSet.get()},
-        };
-    }
 
     const auto processInput = [&](float dt) {
         camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(vlk.window.get()) * 3 * dt);
@@ -1533,18 +1544,22 @@ int main() {
             framebufferResized = true;
         }
         vlk.device->resetFences(currentFrame.inFlightFence.get());
-        vlk.drawCommands(
+        ForwardRenderer renderer = {
+            .renderPass = vlk.renderPass.get(),
+            .framebuffer = vlk.swapchain.framebuffers[imageIndex].get(),
+            .imageExtent = vlk.swapchain.info.imageExtent,
+            .graphicsPipeline = graphicsPipeline.pipeline.get(),
+            .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
+            .clearValues = clearColors,
+        };
+        renderer.begin(currentFrame.commandBuffer);
+        renderer.render(
             currentFrame.commandBuffer,
-            GraphicsContext::DrawInfo {
-                .renderPass = vlk.renderPass.get(),
-                .framebuffer = vlk.swapchain.framebuffers[imageIndex].get(),
-                .imageExtent = vlk.swapchain.info.imageExtent,
-                .graphicsPipeline = graphicsPipeline.pipeline.get(),
-                .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
-                .clearValues = clearColors,
-            },
-            renderableInfo
+            cubeModel.mesh,
+            std::to_array({cubeModel.materialDescriptorSet.get()}),
+            umembers(cubeModelInstances, &ModelInstance::descriptorSet)
         );
+        renderer.end(currentFrame.commandBuffer);
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
         vlk.graphicsQueue.submit(vk::SubmitInfo {
             .waitSemaphoreCount = 1,
@@ -1583,7 +1598,7 @@ int main() {
             const float time = globalTime.ping() / 1000;
             processInput(dt);
             for (size_t i = 0; i < nObjects; i++){
-                cubeInstances[i].updateUbo(camera, vlk.swapchain.info.imageExtent);
+                cubeModelInstances[i].updateUbo(cubeTransforms[i], camera, vlk.swapchain.info.imageExtent);
             }
             const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
             frameCounter.tick();
