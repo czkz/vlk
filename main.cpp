@@ -1010,24 +1010,6 @@ GraphicsContext makeGraphicsContext() {
     return vlk;
 }
 
-struct Mesh {
-    std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
-    std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
-    size_t nVertices;
-    size_t nIndices;
-    bool indexed;
-};
-Mesh makeMesh(const GraphicsContext& vlk, std::string_view path) {
-    const auto [vertices, indices] = load_obj(path);
-    return Mesh {
-        .vertexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
-        .indexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
-        .nVertices = vertices.size(),
-        .nIndices = indices.size(),
-        .indexed = true,
-    };
-}
-
 struct Texture : public ImageAttachment {
     vk::UniqueSampler sampler;
 };
@@ -1234,17 +1216,10 @@ Pipeline makeGraphicsPipeline(
 struct TypedDescriptorPool {
     const GraphicsContext* vlk;
     vk::UniqueDescriptorSetLayout descriptorSetLayout;
-    vk::UniqueDescriptorPool descriptorPool;
-    std::vector<vk::UniqueDescriptorSet> alloc(uint32_t n) const {
-        return vlk->device->allocateDescriptorSetsUnique({
-            .descriptorPool = descriptorPool.get(),
-            .descriptorSetCount = n,
-            .pSetLayouts = std::vector(n, descriptorSetLayout.get()).data(),
-        });
-    }
+    std::vector<vk::UniqueDescriptorPool> descriptorPools;
     vk::UniqueDescriptorSet alloc() const {
         return std::move(vlk->device->allocateDescriptorSetsUnique({
-            .descriptorPool = descriptorPool.get(),
+            .descriptorPool = descriptorPools.back().get(),
             .descriptorSetCount = 1,
             .pSetLayouts = &descriptorSetLayout.get(),
         })[0]);
@@ -1252,7 +1227,7 @@ struct TypedDescriptorPool {
 };
 TypedDescriptorPool makeTypedDescriptorPool(
     const GraphicsContext& vlk,
-    std::span<const vk::DescriptorSetLayoutBinding> materialBindings,
+    std::span<const vk::DescriptorSetLayoutBinding> bindings,
     size_t count
 ) {
     constexpr auto genPoolSizes = [](std::span<const vk::DescriptorSetLayoutBinding> bindings) {
@@ -1270,11 +1245,11 @@ TypedDescriptorPool makeTypedDescriptorPool(
         }
         return ret;
     };
-    return TypedDescriptorPool {
-        .vlk = &vlk,
-        .descriptorSetLayout = vlk.createDescriptorSetLayoutUnique(materialBindings),
-        .descriptorPool = vlk.createDescriptorPoolUnique(genPoolSizes(materialBindings), count),
-    };
+    TypedDescriptorPool ret;
+    ret.vlk = &vlk;
+    ret.descriptorSetLayout = vlk.createDescriptorSetLayoutUnique(bindings);
+    ret.descriptorPools.push_back(vlk.createDescriptorPoolUnique(genPoolSizes(bindings), count));
+    return ret;
 }
 
 struct MappedBuffer {
@@ -1288,80 +1263,116 @@ MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::Buf
     return ret;
 }
 
-// TODO detach material type and material instance from model
-struct Model {
-    Mesh mesh;
-    Texture texture;
-    TypedDescriptorPool materialDescriptorPool;
-    vk::UniqueDescriptorSet materialDescriptorSet;
-};
-Model makeModel(
-    const GraphicsContext& vlk,
-    std::string_view meshPath,
-    std::string_view texturePath
-) {
-    Model ret;
-    ret.mesh = makeMesh(vlk, meshPath);
-    ret.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
-    ret.materialDescriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
-        vk::DescriptorSetLayoutBinding {
-            .binding = 0,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment,
-            .pImmutableSamplers = nullptr,
-        },
-    }), 1);
-    ret.materialDescriptorSet = ret.materialDescriptorPool.alloc();
-    vlk.device->updateDescriptorSets({
-        vk::WriteDescriptorSet {
-            .dstSet = ret.materialDescriptorSet.get(),
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorCount = 1,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .pImageInfo = std::to_array({vk::DescriptorImageInfo {
-                .sampler = ret.texture.sampler.get(),
-                .imageView = ret.texture.imageView.get(),
-                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-            }}).data(),
-            .pBufferInfo = nullptr,
-            .pTexelBufferView = nullptr,
-        },
-    }, nullptr);
-    return ret;
-}
+struct GraphicsSystem {
+    GraphicsContext vlk;
+    TypedDescriptorPool instanceDescriptorPool;
 
-struct ModelInstance {
     struct InstanceUboData {
         alignas(16) Matrix4 MVP;
     };
-    const Model* model;
-    vk::UniqueDescriptorSet descriptorSet;
-    MappedBuffer ubo;
-    void updateUbo(const Transform& transform, const Transform& camera, vk::Extent2D imageExtent) const {
-        Matrix4 model = transform.Matrix();
-        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-        float aspect = (float) imageExtent.width / imageExtent.height;
-        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
-        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
-        InstanceUboData uboData = {
-            .MVP = (proj * view * model).Transposed(),
-        };
-        memcpy(ubo.mapping, &uboData, sizeof(uboData));
+
+    struct MeshResources {
+        std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
+        std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
     };
-};
-struct ModelInstancePool {
-    const Model* model;
-    TypedDescriptorPool descriptorPool;
-    ModelInstance alloc() const {
-        ModelInstance ret;
-        ret.model = model;
-        ret.descriptorSet = descriptorPool.alloc();
-        ret.ubo = makeMappedBuffer(*descriptorPool.vlk, sizeof(ModelInstance::InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer);
-        descriptorPool.vlk->device->updateDescriptorSets({
+    struct UnlitMaterialResources {
+        Texture texture;
+        TypedDescriptorPool materialDescriptorPool;
+        vk::UniqueDescriptorSet materialDescriptorSet;
+    };
+    std::vector<MeshResources> meshResources;
+    std::vector<UnlitMaterialResources> unlitMaterialResources;
+
+
+    struct Mesh {
+        vk::Buffer vertexBuffer;
+        vk::Buffer indexBuffer;
+        size_t nVertices;
+        size_t nIndices;
+        bool indexed;
+    };
+    Mesh makeMesh(std::string_view path) {
+        const auto [vertices, indices] = load_obj(path);
+        meshResources.push_back({
+            .vertexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
+            .indexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
+        });
+        return Mesh {
+            .vertexBuffer = meshResources.back().vertexBuffer.first.get(),
+            .indexBuffer = meshResources.back().indexBuffer.first.get(),
+            .nVertices = vertices.size(),
+            .nIndices = indices.size(),
+            .indexed = true,
+        };
+    }
+
+    struct Material {
+        vk::DescriptorSet descriptorSet;
+        vk::DescriptorSetLayout descriptorSetLayout;
+    };
+    Material makeUnlitMaterial(std::string_view texturePath) {
+        UnlitMaterialResources resources;
+        resources.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
+        resources.materialDescriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
+            vk::DescriptorSetLayoutBinding {
+                .binding = 0,
+                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+                .pImmutableSamplers = nullptr,
+            },
+        }), 1);
+        resources.materialDescriptorSet = resources.materialDescriptorPool.alloc();
+        vlk.device->updateDescriptorSets({
             vk::WriteDescriptorSet {
-                .dstSet = ret.descriptorSet.get(),
+                .dstSet = resources.materialDescriptorSet.get(),
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                .pImageInfo = std::to_array({vk::DescriptorImageInfo {
+                    .sampler = resources.texture.sampler.get(),
+                    .imageView = resources.texture.imageView.get(),
+                    .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                }}).data(),
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr,
+            },
+        }, nullptr);
+        unlitMaterialResources.push_back(std::move(resources));
+        return Material {
+            .descriptorSet = unlitMaterialResources.back().materialDescriptorSet.get(),
+            .descriptorSetLayout = unlitMaterialResources.back().materialDescriptorPool.descriptorSetLayout.get(),
+        };
+    }
+
+    Pipeline makePipeline(
+        const Material& material,
+        const vk::UniqueRenderPass& renderPass,
+        uint32_t subpass
+    ) const {
+        return makeGraphicsPipeline(vlk, std::to_array({
+            material.descriptorSetLayout,
+            instanceDescriptorPool.descriptorSetLayout.get()
+        }), renderPass, subpass);
+    }
+
+    struct RenderableInstance {
+        Mesh mesh;
+        vk::DescriptorSet materialDescriptorSet;
+        vk::UniqueDescriptorSet instanceDescriptorSet;
+        MappedBuffer ubo;
+    };
+    RenderableInstance makeRenderable(const Mesh& mesh, const Material& material) {
+        RenderableInstance ret = {
+            .mesh = mesh,
+            .materialDescriptorSet = material.descriptorSet,
+            .instanceDescriptorSet = instanceDescriptorPool.alloc(),
+            .ubo = makeMappedBuffer(vlk, sizeof(InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer),
+        };
+        vlk.device->updateDescriptorSets({
+            vk::WriteDescriptorSet {
+                .dstSet = ret.instanceDescriptorSet.get(),
                 .dstBinding = 0,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -1377,21 +1388,28 @@ struct ModelInstancePool {
         }, nullptr);
         return ret;
     }
-    Pipeline makePipeline(const vk::UniqueRenderPass& renderPass, uint32_t subpass) const {
-        return makeGraphicsPipeline(*descriptorPool.vlk, std::to_array({
-            model->materialDescriptorPool.descriptorSetLayout.get(),
-            descriptorPool.descriptorSetLayout.get()
-        }), renderPass, subpass);
-    }
+
+    void updateUbo(
+        const RenderableInstance& renderable,
+        const Transform& transform,
+        const Transform& camera,
+        vk::Extent2D imageExtent
+    ) const {
+        Matrix4 model = transform.Matrix();
+        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
+        float aspect = (float) imageExtent.width / imageExtent.height;
+        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
+        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
+        InstanceUboData uboData = {
+            .MVP = (proj * view * model).Transposed(),
+        };
+        memcpy(renderable.ubo.mapping, &uboData, sizeof(uboData));
+    };
 };
-ModelInstancePool makeModelInstancePool(
-    const GraphicsContext& vlk,
-    const Model* model,
-    size_t nObjects
-) {
-    ModelInstancePool ret;
-    ret.model = model;
-    ret.descriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
+GraphicsSystem makeGraphicsSystem(uint32_t nObjects) {
+    GraphicsSystem ret;
+    ret.vlk = makeGraphicsContext();
+    ret.instanceDescriptorPool = makeTypedDescriptorPool(ret.vlk, std::to_array({
         vk::DescriptorSetLayoutBinding {
             .binding = 0,
             .descriptorType = vk::DescriptorType::eUniformBuffer,
@@ -1412,10 +1430,14 @@ struct ForwardRenderer {
     std::span<const vk::ClearValue> clearValues;
 
     // Cache for renderOne()
-    const Model* pLastModel = nullptr;
+    vk::Buffer lastVertexBuffer = nullptr;
+    vk::Buffer lastIndexBuffer = nullptr;
+    vk::DescriptorSet lastMaterial = nullptr;
 
     void begin(const vk::UniqueCommandBuffer& commandBuffer) {
-        pLastModel = nullptr;
+        lastVertexBuffer = nullptr;
+        lastIndexBuffer = nullptr;
+        lastMaterial = nullptr;
         commandBuffer->begin({
             .flags = {},
             .pInheritanceInfo = nullptr,
@@ -1445,42 +1467,43 @@ struct ForwardRenderer {
         });
     }
 
-    void render(
-        const vk::UniqueCommandBuffer& commandBuffer,
-        const Mesh& mesh,
-        const std::ranges::contiguous_range auto& descriptorSets,
-        const std::ranges::input_range auto& instanceDescriptorSets
-    ) {
-        commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer.first.get()}, {0});
-        if (mesh.indexed) {
-            commandBuffer->bindIndexBuffer(mesh.indexBuffer.first.get(), 0, vk::IndexType::eUint32);
-        }
-        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, descriptorSets, nullptr);
-        for (const auto& instanceDescriptorSet : instanceDescriptorSets) {
-            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, descriptorSets.size(), instanceDescriptorSet, nullptr);
-            if (mesh.indexed) {
-                commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
-            } else {
-                commandBuffer->draw(mesh.nVertices, 1, 0, 0);
-            }
-        }
-    }
+    // void render(
+    //     const vk::UniqueCommandBuffer& commandBuffer,
+    //     const GraphicsSystem::Mesh& mesh,
+    //     const std::ranges::contiguous_range auto& descriptorSets,
+    //     const std::ranges::input_range auto& instanceDescriptorSets
+    // ) {
+    //     commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer.first.get()}, {0});
+    //     if (mesh.indexed) {
+    //         commandBuffer->bindIndexBuffer(mesh.indexBuffer.first.get(), 0, vk::IndexType::eUint32);
+    //     }
+    //     commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, descriptorSets, nullptr);
+    //     for (const auto& instanceDescriptorSet : instanceDescriptorSets) {
+    //         commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, descriptorSets.size(), instanceDescriptorSet, nullptr);
+    //         if (mesh.indexed) {
+    //             commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
+    //         } else {
+    //             commandBuffer->draw(mesh.nVertices, 1, 0, 0);
+    //         }
+    //     }
+    // }
 
     void renderOne(
         const vk::UniqueCommandBuffer& commandBuffer,
-        const Model& model,
-        const vk::DescriptorSet& instanceDescriptorSet
+        const GraphicsSystem::RenderableInstance& renderable
     ) {
-        const Mesh& mesh = model.mesh;
-        if (pLastModel != &model) {
-            commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer.first.get()}, {0});
-            if (mesh.indexed) {
-                commandBuffer->bindIndexBuffer(mesh.indexBuffer.first.get(), 0, vk::IndexType::eUint32);
-            }
-            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, model.materialDescriptorSet.get(), nullptr);
-            pLastModel = &model;
+        const GraphicsSystem::Mesh& mesh = renderable.mesh;
+        if (lastVertexBuffer != mesh.vertexBuffer || lastIndexBuffer != mesh.indexBuffer) {
+            commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer}, {0});
+            if (mesh.indexed) { commandBuffer->bindIndexBuffer(mesh.indexBuffer, 0, vk::IndexType::eUint32); }
+            lastVertexBuffer = mesh.vertexBuffer;
+            lastIndexBuffer = mesh.indexBuffer;
         }
-        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 1, instanceDescriptorSet, nullptr);
+        if (lastMaterial != renderable.materialDescriptorSet) {
+            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, renderable.materialDescriptorSet, nullptr);
+            lastMaterial = renderable.materialDescriptorSet;
+        }
+        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 1, renderable.instanceDescriptorSet.get(), nullptr);
         if (mesh.indexed) {
             commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
         } else {
@@ -1494,26 +1517,50 @@ struct ForwardRenderer {
     }
 };
 
-struct CombinedModel {
-    std::unique_ptr<Model> pModel;
-    ModelInstancePool instancePool;
-    ModelInstance alloc() const { return instancePool.alloc(); }
-};
-CombinedModel makeCombinedModel(
-    const GraphicsContext& vlk,
-    std::string_view meshPath,
-    std::string_view texturePath,
-    uint32_t nObjects
-) {
-    CombinedModel ret;
-    ret.pModel = std::make_unique<Model>(makeModel(vlk, meshPath, texturePath));
-    ret.instancePool = makeModelInstancePool(vlk, ret.pModel.get(), nObjects);
-    return ret;
-}
+// struct UnlitModel {
+//     Mesh mesh;
+//     UnlitMaterial material;
+// };
+// UnlitModel makeUnlitModel(
+//     const GraphicsContext& vlk,
+//     std::string_view meshPath,
+//     std::string_view texturePath
+// ) {
+//     Model ret;
+//     ret.mesh = makeMesh(vlk, meshPath);
+//     ret.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
+//     ret.materialDescriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
+//         vk::DescriptorSetLayoutBinding {
+//             .binding = 0,
+//             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+//             .descriptorCount = 1,
+//             .stageFlags = vk::ShaderStageFlagBits::eFragment,
+//             .pImmutableSamplers = nullptr,
+//         },
+//     }), 1);
+//     ret.materialDescriptorSet = ret.materialDescriptorPool.alloc();
+//     vlk.device->updateDescriptorSets({
+//         vk::WriteDescriptorSet {
+//             .dstSet = ret.materialDescriptorSet.get(),
+//             .dstBinding = 0,
+//             .dstArrayElement = 0,
+//             .descriptorCount = 1,
+//             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+//             .pImageInfo = std::to_array({vk::DescriptorImageInfo {
+//                 .sampler = ret.texture.sampler.get(),
+//                 .imageView = ret.texture.imageView.get(),
+//                 .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+//             }}).data(),
+//             .pBufferInfo = nullptr,
+//             .pTexelBufferView = nullptr,
+//         },
+//     }, nullptr);
+//     return ret;
+// }
 
 struct StaticObject {
-    ModelInstance modelInstance;
     Transform transform;
+    GraphicsSystem::RenderableInstance renderable;
 };
 
 struct Player {
@@ -1564,32 +1611,34 @@ void applySystem(const auto& fn, auto&... objectRanges) {
 }
 
 int main() {
-    auto vlk = makeGraphicsContext();
+    auto scene = makeGraphicsSystem(501);
+    auto& vlk = scene.vlk;
 
     constexpr size_t nCubes = 500;
-    const auto cubeModel = makeCombinedModel(vlk, "models/cube.obj", "textures/bricks.png", nCubes);
-    const auto graphicsPipeline = cubeModel.instancePool.makePipeline(vlk.renderPass, 0);
-
-    const auto planeModel = makeCombinedModel(vlk, "models/plane.obj", "textures/white.png", 1);
+    const auto brickMaterial = scene.makeUnlitMaterial("textures/bricks.png");
+    const auto whiteMaterial = scene.makeUnlitMaterial("textures/white.png");
+    const auto cubeMesh = scene.makeMesh("models/cube.obj");
+    const auto planeMesh = scene.makeMesh("models/plane.obj");
+    const auto graphicsPipeline = scene.makePipeline(brickMaterial, vlk.renderPass, 0);
 
     std::vector<StaticObject> sceneObjects;
     for (size_t i = 0; i < nCubes; i++) {
         sceneObjects.push_back({
-            .modelInstance = cubeModel.alloc(),
             .transform = {
                 .position = {i * 2.0f, 0, 0},
                 .rotation = Quaternion::Identity(),
                 .scale = Vector3(1),
-            }
+            },
+            .renderable = scene.makeRenderable(cubeMesh, brickMaterial),
         });
     }
     sceneObjects.push_back({
-        .modelInstance = planeModel.alloc(),
         .transform = {
             .position = {0, 1, -0.5},
             .rotation = Quaternion::Identity(),
             .scale = Vector3(10),
-        }
+        },
+        .renderable = scene.makeRenderable(planeMesh, whiteMaterial),
     });
 
     std::vector<Player> players;
@@ -1609,11 +1658,6 @@ int main() {
             },
         },
     });
-
-    // const auto processInput = [&](float dt) {
-    //     camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(vlk.window.get()) * 3 * dt);
-    //     camera.position += camera.rotation.Rotate(input::get_move(vlk.window.get()) * 0.75 * dt);
-    // };
 
     const auto drawFrame = [&](float time, float dt, size_t frameIndex) {
         (void) time, (void) dt;
@@ -1645,11 +1689,7 @@ int main() {
         };
         renderer.begin(currentFrame.commandBuffer);
         applySystem([&](const auto& e) {
-            renderer.renderOne(
-                currentFrame.commandBuffer,
-                *e.modelInstance.model,
-                e.modelInstance.descriptorSet.get()
-            );
+            renderer.renderOne(currentFrame.commandBuffer, e.renderable);
         }, sceneObjects);
         renderer.end(currentFrame.commandBuffer);
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
@@ -1693,7 +1733,7 @@ int main() {
                 player.update(dt, vlk.window.get());
             }, players);
             applySystem([&](const auto& e) {
-                e.modelInstance.updateUbo(e.transform, players[0].transform, vlk.swapchain.info.imageExtent);
+                scene.updateUbo(e.renderable, e.transform, players[0].transform, vlk.swapchain.info.imageExtent);
             }, sceneObjects);
             const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
             frameCounter.tick();
