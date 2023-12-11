@@ -18,11 +18,6 @@
 #include "input.h"
 #include "load_obj.h"
 
-template <std::ranges::input_range R, typename C>
-constexpr auto umembers(const R& a, auto C::*p) noexcept {
-    return std::views::transform(a, [=](const auto& e) { return (e.*p).get(); });
-}
-
 struct ImageAttachment {
     vk::UniqueImage image;
     vk::UniqueDeviceMemory deviceMemory;
@@ -1382,14 +1377,6 @@ struct ModelInstancePool {
         }, nullptr);
         return ret;
     }
-    std::vector<ModelInstance> alloc(uint32_t n) const {
-        std::vector<ModelInstance> ret;
-        ret.reserve(n);
-        for (size_t i = 0; i < n; i++) {
-            ret.push_back(alloc());
-        }
-        return ret;
-    }
     Pipeline makePipeline(const vk::UniqueRenderPass& renderPass, uint32_t subpass) const {
         return makeGraphicsPipeline(*descriptorPool.vlk, std::to_array({
             model->materialDescriptorPool.descriptorSetLayout.get(),
@@ -1424,7 +1411,11 @@ struct ForwardRenderer {
     vk::PipelineLayout pipelineLayout;
     std::span<const vk::ClearValue> clearValues;
 
+    // Cache for renderOne()
+    const Model* pLastModel = nullptr;
+
     void begin(const vk::UniqueCommandBuffer& commandBuffer) {
+        pLastModel = nullptr;
         commandBuffer->begin({
             .flags = {},
             .pInheritanceInfo = nullptr,
@@ -1475,36 +1466,126 @@ struct ForwardRenderer {
         }
     }
 
+    void renderOne(
+        const vk::UniqueCommandBuffer& commandBuffer,
+        const Model& model,
+        const vk::DescriptorSet& instanceDescriptorSet
+    ) {
+        const Mesh& mesh = model.mesh;
+        if (pLastModel != &model) {
+            commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer.first.get()}, {0});
+            if (mesh.indexed) {
+                commandBuffer->bindIndexBuffer(mesh.indexBuffer.first.get(), 0, vk::IndexType::eUint32);
+            }
+            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, model.materialDescriptorSet.get(), nullptr);
+            pLastModel = &model;
+        }
+        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 1, instanceDescriptorSet, nullptr);
+        if (mesh.indexed) {
+            commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
+        } else {
+            commandBuffer->draw(mesh.nVertices, 1, 0, 0);
+        }
+    }
+
     void end(const vk::UniqueCommandBuffer& commandBuffer) {
         commandBuffer->endRenderPass();
         commandBuffer->end();
     }
 };
 
+struct CombinedModel {
+    std::unique_ptr<Model> pModel;
+    ModelInstancePool instancePool;
+    ModelInstance alloc() const { return instancePool.alloc(); }
+};
+CombinedModel makeCombinedModel(
+    const GraphicsContext& vlk,
+    std::string_view meshPath,
+    std::string_view texturePath,
+    uint32_t nObjects
+) {
+    CombinedModel ret;
+    ret.pModel = std::make_unique<Model>(makeModel(vlk, meshPath, texturePath));
+    ret.instancePool = makeModelInstancePool(vlk, ret.pModel.get(), nObjects);
+    return ret;
+}
+
+struct StaticObject {
+    ModelInstance modelInstance;
+    Transform transform;
+};
+
+struct Player {
+    Transform transform = {{0, 0, 0}};
+    Vector3 euler = Vector3(0);
+    Vector3 velocity = Vector3(0);
+    void update(float dt, GLFWwindow* window) {
+        constexpr float accel = 30;
+        constexpr float airAccel = 300;
+        constexpr float maxSpeed = 3.0;
+        constexpr float airMaxSpeed = 0.3;
+        transform.rotation = Quaternion::Euler(euler += input::get_rotation(window) * 3 * dt);
+        const Vector3 rawMove = input::get_move(window);
+        const Vector2 move = Vector2::Rotate(rawMove.xy().SafeNormalized(), euler.z) * dt;
+        const bool touchingGround = transform.position.z == 0;
+        const bool jumping = rawMove.z > 0;
+        const bool inAir = !touchingGround || jumping;
+        // Friction
+        if (!inAir) {
+            const Vector2 badVel = move ? Vector2::ProjectionOnPlane(velocity.xy(), move) : velocity.xy();
+            if (badVel) {
+                const float friction = 10 * dt;
+                velocity -= Vector3(badVel.ClampedMagnitude(friction), 0);
+            }
+        }
+        // Move
+        {
+            const float curSpeed = Vector2::ProjectionLength(velocity.xy(), move);
+            const float missingSpeed = std::max(0.0f, (inAir ? airMaxSpeed : maxSpeed) - curSpeed);
+            if (move) { velocity += Vector3((move * (inAir ? airAccel : accel)).ClampedMagnitude(missingSpeed), 0); }
+        }
+        // Gravity
+        velocity += Vector3(0, 0, -10 * dt);
+        // Jump
+        if (touchingGround && jumping) { velocity.z = 3.0; }
+        // Apply velocity
+        transform.position += velocity * dt;
+        // Floor collision
+        if (transform.position.z < 0) {
+            transform.position.z = 0;
+            velocity.z = 0;
+        }
+    }
+};
+
+void applySystem(const auto& fn, auto&... objectRanges) {
+    (std::ranges::for_each(objectRanges, fn), ...);
+}
+
 int main() {
     auto vlk = makeGraphicsContext();
 
-    constexpr size_t nObjects = 5;
+    constexpr size_t nCubes = 500;
+    const auto cubeModel = makeCombinedModel(vlk, "models/cube.obj", "textures/bricks.png", nCubes);
+    const auto graphicsPipeline = cubeModel.instancePool.makePipeline(vlk.renderPass, 0);
 
-    const auto cubeModel = makeModel(vlk, "models/cube.obj", "textures/bricks.png");
-    const auto cubeModelInstancePool = makeModelInstancePool(vlk, &cubeModel, nObjects);
-    const auto graphicsPipeline = cubeModelInstancePool.makePipeline(vlk.renderPass, 0);
-
-    const auto cubeModelInstances = cubeModelInstancePool.alloc(nObjects);
-
-    std::vector<Transform> cubeTransforms;
-    cubeTransforms.reserve(nObjects);
-    for (size_t i = 0; i < nObjects; i++) {
-        cubeTransforms.push_back({
-            .position = {i * 2.0f, 0, 0},
-            .rotation = Quaternion::Identity(),
-            .scale = Vector3(1),
+    std::vector<StaticObject> sceneObjects;
+    for (size_t i = 0; i < nCubes; i++) {
+        sceneObjects.push_back({
+            .modelInstance = cubeModel.alloc(),
+            .transform = {
+                .position = {i * 2.0f, 0, 0},
+                .rotation = Quaternion::Identity(),
+                .scale = Vector3(1),
+            }
         });
     }
 
-    auto camera = SpaceCamera({
-        .position = {0, 2, 0},
-        .rotation = Quaternion::Euler({0, 0, std::numbers::pi}),
+    std::vector<Player> players;
+    players.push_back({
+        .transform = {{0, 2, 0}},
+        .euler = {0, 0, std::numbers::pi},
     });
 
     const auto clearColors = std::to_array<vk::ClearValue>({
@@ -1519,10 +1600,10 @@ int main() {
         },
     });
 
-    const auto processInput = [&](float dt) {
-        camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(vlk.window.get()) * 3 * dt);
-        camera.position += camera.rotation.Rotate(input::get_move(vlk.window.get()) * 0.75 * dt);
-    };
+    // const auto processInput = [&](float dt) {
+    //     camera.rotation = camera.rotation * Quaternion::Euler(input::get_rotation(vlk.window.get()) * 3 * dt);
+    //     camera.position += camera.rotation.Rotate(input::get_move(vlk.window.get()) * 0.75 * dt);
+    // };
 
     const auto drawFrame = [&](float time, float dt, size_t frameIndex) {
         (void) time, (void) dt;
@@ -1553,12 +1634,13 @@ int main() {
             .clearValues = clearColors,
         };
         renderer.begin(currentFrame.commandBuffer);
-        renderer.render(
-            currentFrame.commandBuffer,
-            cubeModel.mesh,
-            std::to_array({cubeModel.materialDescriptorSet.get()}),
-            umembers(cubeModelInstances, &ModelInstance::descriptorSet)
-        );
+        applySystem([&](const auto& e) {
+            renderer.renderOne(
+                currentFrame.commandBuffer,
+                *e.modelInstance.model,
+                e.modelInstance.descriptorSet.get()
+            );
+        }, sceneObjects);
         renderer.end(currentFrame.commandBuffer);
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
         vlk.graphicsQueue.submit(vk::SubmitInfo {
@@ -1596,10 +1678,13 @@ int main() {
             glfwPollEvents();
             const float dt = frameCounter.deltaTime / 1000;
             const float time = globalTime.ping() / 1000;
-            processInput(dt);
-            for (size_t i = 0; i < nObjects; i++){
-                cubeModelInstances[i].updateUbo(cubeTransforms[i], camera, vlk.swapchain.info.imageExtent);
-            }
+            // processInput(dt);
+            applySystem([&](auto& player) {
+                player.update(dt, vlk.window.get());
+            }, players);
+            applySystem([&](const auto& e) {
+                e.modelInstance.updateUbo(e.transform, players[0].transform, vlk.swapchain.info.imageExtent);
+            }, sceneObjects);
             const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
             frameCounter.tick();
             if (frameCounter.frameCount == 0) {
