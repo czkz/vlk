@@ -1343,7 +1343,7 @@ struct ModelInstance {
         Matrix4 model = transform.Matrix();
         Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
         float aspect = (float) imageExtent.width / imageExtent.height;
-        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 10}) * Transform::y_flip;
+        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
         // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
         InstanceUboData uboData = {
             .MVP = (proj * view * model).Transposed(),
@@ -1570,6 +1570,8 @@ int main() {
     const auto cubeModel = makeCombinedModel(vlk, "models/cube.obj", "textures/bricks.png", nCubes);
     const auto graphicsPipeline = cubeModel.instancePool.makePipeline(vlk.renderPass, 0);
 
+    const auto planeModel = makeCombinedModel(vlk, "models/plane.obj", "textures/white.png", 1);
+
     std::vector<StaticObject> sceneObjects;
     for (size_t i = 0; i < nCubes; i++) {
         sceneObjects.push_back({
@@ -1581,6 +1583,14 @@ int main() {
             }
         });
     }
+    sceneObjects.push_back({
+        .modelInstance = planeModel.alloc(),
+        .transform = {
+            .position = {0, 1, -0.5},
+            .rotation = Quaternion::Identity(),
+            .scale = Vector3(10),
+        }
+    });
 
     std::vector<Player> players;
     players.push_back({
