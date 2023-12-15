@@ -1263,7 +1263,20 @@ MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::Buf
     return ret;
 }
 
-struct GraphicsSystem {
+struct Mesh {
+    vk::Buffer vertexBuffer;
+    vk::Buffer indexBuffer;
+    size_t nVertices;
+    size_t nIndices;
+    bool indexed;
+};
+
+struct Material {
+    vk::DescriptorSet descriptorSet;
+    vk::DescriptorSetLayout descriptorSetLayout;
+};
+
+struct AssetManager {
     GraphicsContext vlk;
     TypedDescriptorPool instanceDescriptorPool;
 
@@ -1283,14 +1296,6 @@ struct GraphicsSystem {
     std::vector<MeshResources> meshResources;
     std::vector<UnlitMaterialResources> unlitMaterialResources;
 
-
-    struct Mesh {
-        vk::Buffer vertexBuffer;
-        vk::Buffer indexBuffer;
-        size_t nVertices;
-        size_t nIndices;
-        bool indexed;
-    };
     Mesh makeMesh(std::string_view path) {
         const auto [vertices, indices] = load_obj(path);
         meshResources.push_back({
@@ -1306,10 +1311,6 @@ struct GraphicsSystem {
         };
     }
 
-    struct Material {
-        vk::DescriptorSet descriptorSet;
-        vk::DescriptorSetLayout descriptorSetLayout;
-    };
     Material makeUnlitMaterial(std::string_view texturePath) {
         UnlitMaterialResources resources;
         resources.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
@@ -1406,8 +1407,8 @@ struct GraphicsSystem {
         memcpy(renderable.ubo.mapping, &uboData, sizeof(uboData));
     };
 };
-GraphicsSystem makeGraphicsSystem(uint32_t nObjects) {
-    GraphicsSystem ret;
+AssetManager makeAssetManager(uint32_t nObjects) {
+    AssetManager ret;
     ret.vlk = makeGraphicsContext();
     ret.instanceDescriptorPool = makeTypedDescriptorPool(ret.vlk, std::to_array({
         vk::DescriptorSetLayoutBinding {
@@ -1421,7 +1422,8 @@ GraphicsSystem makeGraphicsSystem(uint32_t nObjects) {
     return ret;
 }
 
-struct ForwardRenderer {
+struct ForwardRenderPass {
+    // TODO move ownership here
     vk::RenderPass renderPass;
     vk::Framebuffer framebuffer;
     vk::Extent2D imageExtent;
@@ -1434,15 +1436,15 @@ struct ForwardRenderer {
     vk::Buffer lastIndexBuffer = nullptr;
     vk::DescriptorSet lastMaterial = nullptr;
 
-    void begin(const vk::UniqueCommandBuffer& commandBuffer) {
+    void begin(const vk::CommandBuffer& commandBuffer) {
         lastVertexBuffer = nullptr;
         lastIndexBuffer = nullptr;
         lastMaterial = nullptr;
-        commandBuffer->begin({
+        commandBuffer.begin({
             .flags = {},
             .pInheritanceInfo = nullptr,
         });
-        commandBuffer->beginRenderPass({
+        commandBuffer.beginRenderPass({
             .renderPass = this->renderPass,
             .framebuffer = this->framebuffer,
             .renderArea = {
@@ -1452,8 +1454,8 @@ struct ForwardRenderer {
             .clearValueCount = (uint32_t) this->clearValues.size(),
             .pClearValues = this->clearValues.data(),
         }, vk::SubpassContents::eInline);
-        commandBuffer->bindPipeline(vk::PipelineBindPoint::eGraphics, this->graphicsPipeline);
-        commandBuffer->setViewport(0, vk::Viewport {
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, this->graphicsPipeline);
+        commandBuffer.setViewport(0, vk::Viewport {
             .x = 0,
             .y = 0,
             .width = (float) this->imageExtent.width,
@@ -1461,7 +1463,7 @@ struct ForwardRenderer {
             .minDepth = 0,
             .maxDepth = 1,
         });
-        commandBuffer->setScissor(0, vk::Rect2D {
+        commandBuffer.setScissor(0, vk::Rect2D {
             .offset = {0, 0},
             .extent = this->imageExtent,
         });
@@ -1489,31 +1491,31 @@ struct ForwardRenderer {
     // }
 
     void renderOne(
-        const vk::UniqueCommandBuffer& commandBuffer,
-        const GraphicsSystem::RenderableInstance& renderable
+        const vk::CommandBuffer& commandBuffer,
+        const AssetManager::RenderableInstance& renderable
     ) {
-        const GraphicsSystem::Mesh& mesh = renderable.mesh;
+        const Mesh& mesh = renderable.mesh;
         if (lastVertexBuffer != mesh.vertexBuffer || lastIndexBuffer != mesh.indexBuffer) {
-            commandBuffer->bindVertexBuffers(0, {mesh.vertexBuffer}, {0});
-            if (mesh.indexed) { commandBuffer->bindIndexBuffer(mesh.indexBuffer, 0, vk::IndexType::eUint32); }
+            commandBuffer.bindVertexBuffers(0, {mesh.vertexBuffer}, {0});
+            if (mesh.indexed) { commandBuffer.bindIndexBuffer(mesh.indexBuffer, 0, vk::IndexType::eUint32); }
             lastVertexBuffer = mesh.vertexBuffer;
             lastIndexBuffer = mesh.indexBuffer;
         }
         if (lastMaterial != renderable.materialDescriptorSet) {
-            commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, renderable.materialDescriptorSet, nullptr);
+            commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 0, renderable.materialDescriptorSet, nullptr);
             lastMaterial = renderable.materialDescriptorSet;
         }
-        commandBuffer->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 1, renderable.instanceDescriptorSet.get(), nullptr);
+        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, this->pipelineLayout, 1, renderable.instanceDescriptorSet.get(), nullptr);
         if (mesh.indexed) {
-            commandBuffer->drawIndexed(mesh.nIndices, 1, 0, 0, 0);
+            commandBuffer.drawIndexed(mesh.nIndices, 1, 0, 0, 0);
         } else {
-            commandBuffer->draw(mesh.nVertices, 1, 0, 0);
+            commandBuffer.draw(mesh.nVertices, 1, 0, 0);
         }
     }
 
-    void end(const vk::UniqueCommandBuffer& commandBuffer) {
-        commandBuffer->endRenderPass();
-        commandBuffer->end();
+    void end(const vk::CommandBuffer& commandBuffer) {
+        commandBuffer.endRenderPass();
+        commandBuffer.end();
     }
 };
 
@@ -1560,7 +1562,7 @@ struct ForwardRenderer {
 
 struct StaticObject {
     Transform transform;
-    GraphicsSystem::RenderableInstance renderable;
+    AssetManager::RenderableInstance renderable;
 };
 
 struct Player {
@@ -1610,64 +1612,147 @@ void applySystem(const auto& fn, auto&... objectRanges) {
     (std::ranges::for_each(objectRanges, fn), ...);
 }
 
-int main() {
-    auto scene = makeGraphicsSystem(501);
-    auto& vlk = scene.vlk;
+class Scene {
+public:
+    virtual void frame(float time, float dt, size_t frameNumber, vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) = 0;
+};
 
-    constexpr size_t nCubes = 500;
-    const auto brickMaterial = scene.makeUnlitMaterial("textures/bricks.png");
-    const auto whiteMaterial = scene.makeUnlitMaterial("textures/white.png");
-    const auto cubeMesh = scene.makeMesh("models/cube.obj");
-    const auto planeMesh = scene.makeMesh("models/plane.obj");
-    const auto graphicsPipeline = scene.makePipeline(brickMaterial, vlk.renderPass, 0);
+class Scene1 : public Scene {
+    GraphicsContext* vlk;
+    AssetManager* assets;
 
     std::vector<StaticObject> sceneObjects;
-    for (size_t i = 0; i < nCubes; i++) {
+    std::vector<Player> players;
+    Pipeline graphicsPipeline;
+
+public:
+    Scene1(GraphicsContext* vlk, AssetManager* assets) : vlk(vlk), assets(assets) {}
+
+    void init() {
+        constexpr size_t nCubes = 500;
+        const auto brickMaterial = assets->makeUnlitMaterial("textures/bricks.png");
+        const auto whiteMaterial = assets->makeUnlitMaterial("textures/white.png");
+        const auto cubeMesh = assets->makeMesh("models/cube.obj");
+        const auto planeMesh = assets->makeMesh("models/plane.obj");
+        graphicsPipeline = assets->makePipeline(brickMaterial, vlk->renderPass, 0);
+
+        for (size_t i = 0; i < nCubes; i++) {
+            sceneObjects.push_back({
+                .transform = {
+                    .position = {i * 2.0f, 0, 0},
+                    .rotation = Quaternion::Identity(),
+                    .scale = Vector3(1),
+                },
+                .renderable = assets->makeRenderable(cubeMesh, brickMaterial),
+            });
+        }
         sceneObjects.push_back({
             .transform = {
-                .position = {i * 2.0f, 0, 0},
+                .position = {0, 1, -0.5},
                 .rotation = Quaternion::Identity(),
-                .scale = Vector3(1),
+                .scale = Vector3(10),
             },
-            .renderable = scene.makeRenderable(cubeMesh, brickMaterial),
+            .renderable = assets->makeRenderable(planeMesh, whiteMaterial),
         });
+
+        players.push_back({
+            .transform = {{0, 2, 0}},
+            .euler = {0, 0, std::numbers::pi},
+        });
+
     }
-    sceneObjects.push_back({
-        .transform = {
-            .position = {0, 1, -0.5},
-            .rotation = Quaternion::Identity(),
-            .scale = Vector3(10),
-        },
-        .renderable = scene.makeRenderable(planeMesh, whiteMaterial),
-    });
 
-    std::vector<Player> players;
-    players.push_back({
-        .transform = {{0, 2, 0}},
-        .euler = {0, 0, std::numbers::pi},
-    });
+    void frame(float time, float dt, size_t frameNumber, vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) override {
+        (void) time;
+        (void) frameNumber;
+        applySystem([&](auto& player) {
+            player.update(dt, vlk->window.get());
+        }, players);
+        render(commandBuffer, framebuffer);
+    }
 
-    const auto clearColors = std::to_array<vk::ClearValue>({
-        {
-            .color = {
-                .float32 = std::to_array<float>({0, 0, 0, 1})
+private:
+    void render(vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) {
+        applySystem([&](const auto& e) {
+            assets->updateUbo(e.renderable, e.transform, players[0].transform, vlk->swapchain.info.imageExtent);
+        }, sceneObjects);
+        const auto clearColors = std::to_array<vk::ClearValue>({
+            {
+                .color = {
+                    .float32 = std::to_array<float>({0, 0, 0, 1})
+                },
+            }, {
+                .depthStencil = {
+                    .depth = 1.0f,
+                },
             },
-        }, {
-            .depthStencil = {
-                .depth = 1.0f,
-            },
-        },
-    });
+        });
+        ForwardRenderPass renderPass = {
+            .renderPass = vlk->renderPass.get(),
+            .framebuffer = framebuffer,
+            .imageExtent = vlk->swapchain.info.imageExtent,
+            .graphicsPipeline = graphicsPipeline.pipeline.get(),
+            .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
+            .clearValues = clearColors,
+        };
+        renderPass.begin(commandBuffer);
+        applySystem([&](const auto& e) {
+            renderPass.renderOne(commandBuffer, e.renderable);
+        }, sceneObjects);
+        renderPass.end(commandBuffer);
+    }
+};
 
-    const auto drawFrame = [&](float time, float dt, size_t frameIndex) {
+void runWindowLoop(GraphicsContext& vlk, auto&& drawFrame) {
+    FrameCounter frameCounter;
+    const Stopwatch globalTime;
+    while (!glfwWindowShouldClose(vlk.window.get())) {
+        glfwPollEvents();
+        const float dt = frameCounter.deltaTime / 1000;
+        const float time = globalTime.ping() / 1000;
+        const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
+        frameCounter.tick();
+        if (frameCounter.frameCount == 0) {
+            const double t = globalTime.ping() / 1000;
+            const double fc = frameCounter.frameCount;
+            prn_raw(t, " s total, ", t/fc*1000, " ms avg (", fc/t, " fps)");
+            break;
+        }
+        if (framebufferResized) {
+            prn("Framebuffer resized");
+            int w, h;
+            glfwGetFramebufferSize(vlk.window.get(), &w, &h);
+            if (w == 0 || h == 0) {
+                prn("Window is minimized, waiting...");
+                while (w == 0 || h == 0) {
+                    glfwWaitEvents();
+                    glfwGetFramebufferSize(vlk.window.get(), &w, &h);
+                }
+            }
+            vlk.device->waitIdle();
+            vlk.recreateSwapchainUnique();
+            vlk.recreateFramebuffersUnique();
+        }
+    }
+    vlk.device->waitIdle();
+}
+
+class Renderer {
+    GraphicsContext* vlk;
+    Scene* scene;
+
+public:
+    Renderer(GraphicsContext* vlk, Scene* scene) : vlk(vlk), scene(scene) {}
+
+    bool drawFrame(float time, float dt, size_t frameIndex) {
         (void) time, (void) dt;
         bool framebufferResized = false;
-        const auto& currentFrame = vlk.framesInFlight[frameIndex % vlk.maxFramesInFlight];
-        (void) vlk.device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
+        const auto& currentFrame = vlk->framesInFlight[frameIndex % vlk->maxFramesInFlight];
+        (void) vlk->device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
         vk::Result res;
         uint32_t imageIndex;
         try {
-            std::tie(res, imageIndex) = vlk.device->acquireNextImageKHR(vlk.swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
+            std::tie(res, imageIndex) = vlk->device->acquireNextImageKHR(vlk->swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr);
         } catch (const vk::OutOfDateKHRError& e) {
             framebufferResized = true;
             return framebufferResized;
@@ -1678,22 +1763,10 @@ int main() {
             // so we can't return without waiting on it
             framebufferResized = true;
         }
-        vlk.device->resetFences(currentFrame.inFlightFence.get());
-        ForwardRenderer renderer = {
-            .renderPass = vlk.renderPass.get(),
-            .framebuffer = vlk.swapchain.framebuffers[imageIndex].get(),
-            .imageExtent = vlk.swapchain.info.imageExtent,
-            .graphicsPipeline = graphicsPipeline.pipeline.get(),
-            .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
-            .clearValues = clearColors,
-        };
-        renderer.begin(currentFrame.commandBuffer);
-        applySystem([&](const auto& e) {
-            renderer.renderOne(currentFrame.commandBuffer, e.renderable);
-        }, sceneObjects);
-        renderer.end(currentFrame.commandBuffer);
+        vlk->device->resetFences(currentFrame.inFlightFence.get());
+        scene->frame(time, dt, frameIndex, currentFrame.commandBuffer.get(), vlk->swapchain.framebuffers[imageIndex].get());
         constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
-        vlk.graphicsQueue.submit(vk::SubmitInfo {
+        vlk->graphicsQueue.submit(vk::SubmitInfo {
             .waitSemaphoreCount = 1,
             .pWaitSemaphores = &currentFrame.imageAvailableSemaphore.get(),
             .pWaitDstStageMask = waitStages,
@@ -1703,11 +1776,11 @@ int main() {
             .pSignalSemaphores = &currentFrame.renderFinishedSemaphore.get(),
         }, currentFrame.inFlightFence.get());
         try {
-            res = vlk.presentQueue.presentKHR(vk::PresentInfoKHR {
+            res = vlk->presentQueue.presentKHR(vk::PresentInfoKHR {
                 .waitSemaphoreCount = 1,
                 .pWaitSemaphores = &currentFrame.renderFinishedSemaphore.get(),
                 .swapchainCount = 1,
-                .pSwapchains = &vlk.swapchain.swapchain.get(),
+                .pSwapchains = &vlk->swapchain.swapchain.get(),
                 .pImageIndices = &imageIndex,
                 .pResults = nullptr,
             });
@@ -1720,45 +1793,19 @@ int main() {
         return framebufferResized;
     };
 
-    // Main loop
-    [&] {
-        FrameCounter frameCounter;
-        const Stopwatch globalTime;
-        while (!glfwWindowShouldClose(vlk.window.get())) {
-            glfwPollEvents();
-            const float dt = frameCounter.deltaTime / 1000;
-            const float time = globalTime.ping() / 1000;
-            // processInput(dt);
-            applySystem([&](auto& player) {
-                player.update(dt, vlk.window.get());
-            }, players);
-            applySystem([&](const auto& e) {
-                scene.updateUbo(e.renderable, e.transform, players[0].transform, vlk.swapchain.info.imageExtent);
-            }, sceneObjects);
-            const bool framebufferResized = drawFrame(time, dt, frameCounter.frameCount);
-            frameCounter.tick();
-            if (frameCounter.frameCount == 0) {
-                const double t = globalTime.ping() / 1000;
-                const double fc = frameCounter.frameCount;
-                prn_raw(t, " s total, ", t/fc*1000, " ms avg (", fc/t, " fps)");
-                break;
-            }
-            if (framebufferResized) {
-                prn("Framebuffer resized");
-                int w, h;
-                glfwGetFramebufferSize(vlk.window.get(), &w, &h);
-                if (w == 0 || h == 0) {
-                    prn("Window is minimized, waiting...");
-                    while (w == 0 || h == 0) {
-                        glfwWaitEvents();
-                        glfwGetFramebufferSize(vlk.window.get(), &w, &h);
-                    }
-                }
-                vlk.device->waitIdle();
-                vlk.recreateSwapchainUnique();
-                vlk.recreateFramebuffersUnique();
-            }
-        }
-    }();
-    vlk.device->waitIdle();
+    bool operator()(float time, float dt, size_t frameIndex) {
+        return drawFrame(time, dt, frameIndex);
+    }
+};
+
+int main() {
+    auto assets = makeAssetManager(501);
+    auto& vlk = assets.vlk;
+
+    Scene1 scene {&vlk, &assets};
+    scene.init();
+
+    Renderer renderer {&vlk, &scene};
+
+    runWindowLoop(vlk, renderer);
 }
