@@ -626,7 +626,7 @@ struct GraphicsContext {
         }
     }
 };
-GraphicsContext makeGraphicsContext() {
+auto makeGraphicsContext() {
     glfwInit();
     GraphicsContext vlk;
 
@@ -1013,7 +1013,7 @@ GraphicsContext makeGraphicsContext() {
 struct Texture : public ImageAttachment {
     vk::UniqueSampler sampler;
 };
-Texture makeTexture(const GraphicsContext& vlk, std::string_view path, vk::Format format) {
+auto makeTexture(const GraphicsContext& vlk, std::string_view path, vk::Format format) {
     const int channels = std::map<vk::Format, int> {
         {vk::Format::eR8Srgb,       1},
         {vk::Format::eR8G8Srgb,     2},
@@ -1063,7 +1063,7 @@ struct Pipeline {
     vk::UniquePipelineLayout pipelineLayout;
     vk::UniquePipeline pipeline;
 };
-Pipeline makeGraphicsPipeline(
+auto makeGraphicsPipeline(
     const GraphicsContext& vlk,
     std::span<const vk::DescriptorSetLayout> descriptorSetLayouts,
     const vk::UniqueRenderPass& renderPass,
@@ -1225,7 +1225,7 @@ struct TypedDescriptorPool {
         })[0]);
     }
 };
-TypedDescriptorPool makeTypedDescriptorPool(
+auto makeTypedDescriptorPool(
     const GraphicsContext& vlk,
     std::span<const vk::DescriptorSetLayoutBinding> bindings,
     size_t count
@@ -1256,7 +1256,7 @@ struct MappedBuffer {
     std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> buffer;
     void* mapping;
 };
-MappedBuffer makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::BufferUsageFlags usage) {
+auto makeMappedBuffer(const GraphicsContext& vlk, uint32_t size, vk::BufferUsageFlags usage) {
     MappedBuffer ret;
     ret.buffer = vlk.createBufferUnique(size, usage, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
     ret.mapping = vlk.device->mapMemory(ret.buffer.second.get(), 0, size, {});
@@ -1564,149 +1564,9 @@ struct ForwardRenderPass {
 //     return ret;
 // }
 
-struct StaticObject {
-    Transform transform;
-    RenderablePool::Instance renderable;
-};
-
-struct Player {
-    Transform transform = {{0, 0, 0}};
-    Vector3 euler = Vector3(0);
-    Vector3 velocity = Vector3(0);
-    void update(float dt, GLFWwindow* window) {
-        constexpr float accel = 30;
-        constexpr float airAccel = 300;
-        constexpr float maxSpeed = 3.0;
-        constexpr float airMaxSpeed = 0.3;
-        transform.rotation = Quaternion::Euler(euler += input::get_rotation(window) * 3 * dt);
-        const Vector3 rawMove = input::get_move(window);
-        const Vector2 move = Vector2::Rotate(rawMove.xy().SafeNormalized(), euler.z) * dt;
-        const bool touchingGround = transform.position.z == 0;
-        const bool jumping = rawMove.z > 0;
-        const bool inAir = !touchingGround || jumping;
-        // Friction
-        if (!inAir) {
-            const Vector2 badVel = move ? Vector2::ProjectionOnPlane(velocity.xy(), move) : velocity.xy();
-            if (badVel) {
-                const float friction = 10 * dt;
-                velocity -= Vector3(badVel.ClampedMagnitude(friction), 0);
-            }
-        }
-        // Move
-        {
-            const float curSpeed = Vector2::ProjectionLength(velocity.xy(), move);
-            const float missingSpeed = std::max(0.0f, (inAir ? airMaxSpeed : maxSpeed) - curSpeed);
-            if (move) { velocity += Vector3((move * (inAir ? airAccel : accel)).ClampedMagnitude(missingSpeed), 0); }
-        }
-        // Gravity
-        velocity += Vector3(0, 0, -10 * dt);
-        // Jump
-        if (touchingGround && jumping) { velocity.z = 3.0; }
-        // Apply velocity
-        transform.position += velocity * dt;
-        // Floor collision
-        if (transform.position.z < 0) {
-            transform.position.z = 0;
-            velocity.z = 0;
-        }
-    }
-};
-
-void applySystem(const auto& fn, auto&... objectRanges) {
-    (std::ranges::for_each(objectRanges, fn), ...);
-}
-
 class Scene {
 public:
     virtual void frame(float time, float dt, size_t frameNumber, vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) = 0;
-};
-
-class Scene1 : public Scene {
-    GraphicsContext* vlk;
-    AssetPool* assets;
-    RenderablePool renderablePool;
-
-    std::vector<StaticObject> sceneObjects;
-    std::vector<Player> players;
-    Pipeline graphicsPipeline;
-
-public:
-    Scene1(GraphicsContext* vlk, AssetPool* assets)
-        : vlk(vlk), assets(assets), renderablePool(vlk, 501) {}
-
-    void init() {
-        constexpr size_t nCubes = 500;
-        const auto brickMaterial = assets->makeUnlitMaterial("textures/bricks.png");
-        const auto whiteMaterial = assets->makeUnlitMaterial("textures/white.png");
-        const auto cubeMesh = assets->makeMesh("models/cube.obj");
-        const auto planeMesh = assets->makeMesh("models/plane.obj");
-        graphicsPipeline = renderablePool.makePipeline(brickMaterial, vlk->renderPass, 0);
-
-        for (size_t i = 0; i < nCubes; i++) {
-            sceneObjects.push_back({
-                .transform = {
-                    .position = {i * 2.0f, 0, 0},
-                    .rotation = Quaternion::Identity(),
-                    .scale = Vector3(1),
-                },
-                .renderable = renderablePool.alloc(cubeMesh, brickMaterial),
-            });
-        }
-        sceneObjects.push_back({
-            .transform = {
-                .position = {0, 1, -0.5},
-                .rotation = Quaternion::Identity(),
-                .scale = Vector3(10),
-            },
-            .renderable = renderablePool.alloc(planeMesh, whiteMaterial),
-        });
-
-        players.push_back({
-            .transform = {{0, 2, 0}},
-            .euler = {0, 0, std::numbers::pi},
-        });
-
-    }
-
-    void frame(float time, float dt, size_t frameNumber, vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) override {
-        (void) time;
-        (void) frameNumber;
-        applySystem([&](auto& player) {
-            player.update(dt, vlk->window.get());
-        }, players);
-        render(commandBuffer, framebuffer);
-    }
-
-private:
-    void render(vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) {
-        applySystem([&](const auto& e) {
-            e.renderable.updateUbo(e.transform, players[0].transform, vlk->swapchain.info.imageExtent);
-        }, sceneObjects);
-        const auto clearColors = std::to_array<vk::ClearValue>({
-            {
-                .color = {
-                    .float32 = std::to_array<float>({0, 0, 0, 1})
-                },
-            }, {
-                .depthStencil = {
-                    .depth = 1.0f,
-                },
-            },
-        });
-        ForwardRenderPass renderPass = {
-            .renderPass = vlk->renderPass.get(),
-            .framebuffer = framebuffer,
-            .imageExtent = vlk->swapchain.info.imageExtent,
-            .graphicsPipeline = graphicsPipeline.pipeline.get(),
-            .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
-            .clearValues = clearColors,
-        };
-        renderPass.begin(commandBuffer);
-        applySystem([&](const auto& e) {
-            renderPass.renderOne(commandBuffer, e.renderable);
-        }, sceneObjects);
-        renderPass.end(commandBuffer);
-    }
 };
 
 void runWindowLoop(GraphicsContext& vlk, auto&& drawFrame) {
@@ -1797,10 +1657,150 @@ public:
             framebufferResized = true;
         }
         return framebufferResized;
-    };
+    }
 
     bool operator()(float time, float dt, size_t frameIndex) {
         return drawFrame(time, dt, frameIndex);
+    }
+};
+
+void applySystem(const auto& fn, auto&... objectRanges) {
+    (std::ranges::for_each(objectRanges, fn), ...);
+}
+
+struct StaticObject {
+    Transform transform;
+    RenderablePool::Instance renderable;
+};
+
+struct Player {
+    Transform transform = {{0, 0, 0}};
+    Vector3 euler = Vector3(0);
+    Vector3 velocity = Vector3(0);
+    void update(float dt, GLFWwindow* window) {
+        constexpr float accel = 30;
+        constexpr float airAccel = 300;
+        constexpr float maxSpeed = 3.0;
+        constexpr float airMaxSpeed = 0.3;
+        transform.rotation = Quaternion::Euler(euler += input::get_rotation(window) * 3 * dt);
+        const Vector3 rawMove = input::get_move(window);
+        const Vector2 move = Vector2::Rotate(rawMove.xy().SafeNormalized(), euler.z) * dt;
+        const bool touchingGround = transform.position.z == 0;
+        const bool jumping = rawMove.z > 0;
+        const bool inAir = !touchingGround || jumping;
+        // Friction
+        if (!inAir) {
+            const Vector2 badVel = move ? Vector2::ProjectionOnPlane(velocity.xy(), move) : velocity.xy();
+            if (badVel) {
+                const float friction = 10 * dt;
+                velocity -= Vector3(badVel.ClampedMagnitude(friction), 0);
+            }
+        }
+        // Move
+        {
+            const float curSpeed = Vector2::ProjectionLength(velocity.xy(), move);
+            const float missingSpeed = std::max(0.0f, (inAir ? airMaxSpeed : maxSpeed) - curSpeed);
+            if (move) { velocity += Vector3((move * (inAir ? airAccel : accel)).ClampedMagnitude(missingSpeed), 0); }
+        }
+        // Gravity
+        velocity += Vector3(0, 0, -10 * dt);
+        // Jump
+        if (touchingGround && jumping) { velocity.z = 3.0; }
+        // Apply velocity
+        transform.position += velocity * dt;
+        // Floor collision
+        if (transform.position.z < 0) {
+            transform.position.z = 0;
+            velocity.z = 0;
+        }
+    }
+};
+
+class Scene1 : public Scene {
+    GraphicsContext* vlk;
+    AssetPool* assets;
+    RenderablePool renderablePool;
+
+    std::vector<StaticObject> sceneObjects;
+    std::vector<Player> players;
+    Pipeline graphicsPipeline;
+
+public:
+    Scene1(GraphicsContext* vlk, AssetPool* assets)
+        : vlk(vlk), assets(assets), renderablePool(vlk, 501) {}
+
+    void init() {
+        constexpr size_t nCubes = 500;
+        const auto brickMaterial = assets->makeUnlitMaterial("textures/bricks.png");
+        const auto whiteMaterial = assets->makeUnlitMaterial("textures/white.png");
+        const auto cubeMesh = assets->makeMesh("models/cube.obj");
+        const auto planeMesh = assets->makeMesh("models/plane.obj");
+        graphicsPipeline = renderablePool.makePipeline(brickMaterial, vlk->renderPass, 0);
+
+        for (size_t i = 0; i < nCubes; i++) {
+            sceneObjects.push_back({
+                .transform = {
+                    .position = {i * 2.0f, 0, 0},
+                    .rotation = Quaternion::Identity(),
+                    .scale = Vector3(1),
+                },
+                .renderable = renderablePool.alloc(cubeMesh, brickMaterial),
+            });
+        }
+        sceneObjects.push_back({
+            .transform = {
+                .position = {0, 1, -0.5},
+                .rotation = Quaternion::Identity(),
+                .scale = Vector3(10),
+            },
+            .renderable = renderablePool.alloc(planeMesh, whiteMaterial),
+        });
+
+        players.push_back({
+            .transform = {{0, 2, 0}},
+            .euler = {0, 0, std::numbers::pi},
+        });
+
+    }
+
+    void frame(float time, float dt, size_t frameNumber, vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) override {
+        (void) time;
+        (void) frameNumber;
+        applySystem([&](auto& player) {
+            player.update(dt, vlk->window.get());
+        }, players);
+        render(commandBuffer, framebuffer);
+    }
+
+private:
+    void render(vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) {
+        applySystem([&](const auto& e) {
+            e.renderable.updateUbo(e.transform, players[0].transform, vlk->swapchain.info.imageExtent);
+        }, sceneObjects);
+        const auto clearColors = std::to_array<vk::ClearValue>({
+            {
+                .color = {
+                    .float32 = std::to_array<float>({0, 0, 0, 1})
+                },
+            }, {
+                .depthStencil = {
+                    .depth = 1.0f,
+                },
+            },
+        });
+        ForwardRenderPass renderPass = {
+            .renderPass = vlk->renderPass.get(),
+            .framebuffer = framebuffer,
+            .imageExtent = vlk->swapchain.info.imageExtent,
+            .graphicsPipeline = graphicsPipeline.pipeline.get(),
+            .pipelineLayout = graphicsPipeline.pipelineLayout.get(),
+            .clearValues = clearColors,
+        };
+        renderPass.begin(commandBuffer);
+        applySystem([&](const auto& e) {
+            renderPass.renderOne(commandBuffer, e.renderable);
+        }, sceneObjects);
+        renderPass.end(commandBuffer);
     }
 };
 
