@@ -1276,14 +1276,86 @@ struct Material {
     vk::DescriptorSetLayout descriptorSetLayout;
 };
 
-struct AssetManager {
-    GraphicsContext vlk;
+struct RenderablePool {
+    GraphicsContext* vlk;
     TypedDescriptorPool instanceDescriptorPool;
-
     struct InstanceUboData {
         alignas(16) Matrix4 MVP;
     };
 
+    RenderablePool(GraphicsContext* vlk, uint32_t nObjects) : vlk(vlk) {
+        instanceDescriptorPool = makeTypedDescriptorPool(*vlk, std::to_array({
+            vk::DescriptorSetLayoutBinding {
+                .binding = 0,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eVertex,
+                .pImmutableSamplers = nullptr,
+            },
+        }), nObjects);
+    }
+
+    Pipeline makePipeline(
+        const Material& material,
+        const vk::UniqueRenderPass& renderPass,
+        uint32_t subpass
+    ) const {
+        return makeGraphicsPipeline(*vlk, std::to_array({
+            material.descriptorSetLayout,
+            instanceDescriptorPool.descriptorSetLayout.get()
+        }), renderPass, subpass);
+    }
+
+    struct Instance {
+        Mesh mesh;
+        vk::DescriptorSet materialDescriptorSet;
+        vk::UniqueDescriptorSet instanceDescriptorSet;
+        MappedBuffer ubo;
+
+        void updateUbo(
+            const Transform& transform,
+            const Transform& camera,
+            vk::Extent2D imageExtent
+        ) const {
+            Matrix4 model = transform.Matrix();
+            Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
+            float aspect = (float) imageExtent.width / imageExtent.height;
+            Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
+            // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
+            InstanceUboData uboData = {
+                .MVP = (proj * view * model).Transposed(),
+            };
+            memcpy(this->ubo.mapping, &uboData, sizeof(uboData));
+        }
+    };
+    Instance alloc(const Mesh& mesh, const Material& material) {
+        Instance ret = {
+            .mesh = mesh,
+            .materialDescriptorSet = material.descriptorSet,
+            .instanceDescriptorSet = instanceDescriptorPool.alloc(),
+            .ubo = makeMappedBuffer(*vlk, sizeof(InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer),
+        };
+        vlk->device->updateDescriptorSets({
+            vk::WriteDescriptorSet {
+                .dstSet = ret.instanceDescriptorSet.get(),
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .pImageInfo = nullptr,
+                .pBufferInfo = std::to_array({vk::DescriptorBufferInfo {
+                    .buffer = ret.ubo.buffer.first.get(),
+                    .offset = 0,
+                    .range = vk::WholeSize,
+                }}).data(),
+                .pTexelBufferView = nullptr,
+            },
+        }, nullptr);
+        return ret;
+    }
+};
+
+class AssetPool {
     struct MeshResources {
         std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> vertexBuffer;
         std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory> indexBuffer;
@@ -1293,14 +1365,20 @@ struct AssetManager {
         TypedDescriptorPool materialDescriptorPool;
         vk::UniqueDescriptorSet materialDescriptorSet;
     };
+
+private:
+    GraphicsContext* vlk;
     std::vector<MeshResources> meshResources;
     std::vector<UnlitMaterialResources> unlitMaterialResources;
+
+public:
+    AssetPool(GraphicsContext* vlk) : vlk(vlk) {}
 
     Mesh makeMesh(std::string_view path) {
         const auto [vertices, indices] = load_obj(path);
         meshResources.push_back({
-            .vertexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
-            .indexBuffer = vlk.createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
+            .vertexBuffer = vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices),
+            .indexBuffer = vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices),
         });
         return Mesh {
             .vertexBuffer = meshResources.back().vertexBuffer.first.get(),
@@ -1313,8 +1391,8 @@ struct AssetManager {
 
     Material makeUnlitMaterial(std::string_view texturePath) {
         UnlitMaterialResources resources;
-        resources.texture = makeTexture(vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
-        resources.materialDescriptorPool = makeTypedDescriptorPool(vlk, std::to_array({
+        resources.texture = makeTexture(*vlk, texturePath, vk::Format::eR8G8B8A8Srgb);
+        resources.materialDescriptorPool = makeTypedDescriptorPool(*vlk, std::to_array({
             vk::DescriptorSetLayoutBinding {
                 .binding = 0,
                 .descriptorType = vk::DescriptorType::eCombinedImageSampler,
@@ -1324,7 +1402,7 @@ struct AssetManager {
             },
         }), 1);
         resources.materialDescriptorSet = resources.materialDescriptorPool.alloc();
-        vlk.device->updateDescriptorSets({
+        vlk->device->updateDescriptorSets({
             vk::WriteDescriptorSet {
                 .dstSet = resources.materialDescriptorSet.get(),
                 .dstBinding = 0,
@@ -1346,81 +1424,7 @@ struct AssetManager {
             .descriptorSetLayout = unlitMaterialResources.back().materialDescriptorPool.descriptorSetLayout.get(),
         };
     }
-
-    Pipeline makePipeline(
-        const Material& material,
-        const vk::UniqueRenderPass& renderPass,
-        uint32_t subpass
-    ) const {
-        return makeGraphicsPipeline(vlk, std::to_array({
-            material.descriptorSetLayout,
-            instanceDescriptorPool.descriptorSetLayout.get()
-        }), renderPass, subpass);
-    }
-
-    struct RenderableInstance {
-        Mesh mesh;
-        vk::DescriptorSet materialDescriptorSet;
-        vk::UniqueDescriptorSet instanceDescriptorSet;
-        MappedBuffer ubo;
-    };
-    RenderableInstance makeRenderable(const Mesh& mesh, const Material& material) {
-        RenderableInstance ret = {
-            .mesh = mesh,
-            .materialDescriptorSet = material.descriptorSet,
-            .instanceDescriptorSet = instanceDescriptorPool.alloc(),
-            .ubo = makeMappedBuffer(vlk, sizeof(InstanceUboData), vk::BufferUsageFlagBits::eUniformBuffer),
-        };
-        vlk.device->updateDescriptorSets({
-            vk::WriteDescriptorSet {
-                .dstSet = ret.instanceDescriptorSet.get(),
-                .dstBinding = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = vk::DescriptorType::eUniformBuffer,
-                .pImageInfo = nullptr,
-                .pBufferInfo = std::to_array({vk::DescriptorBufferInfo {
-                    .buffer = ret.ubo.buffer.first.get(),
-                    .offset = 0,
-                    .range = vk::WholeSize,
-                }}).data(),
-                .pTexelBufferView = nullptr,
-            },
-        }, nullptr);
-        return ret;
-    }
-
-    void updateUbo(
-        const RenderableInstance& renderable,
-        const Transform& transform,
-        const Transform& camera,
-        vk::Extent2D imageExtent
-    ) const {
-        Matrix4 model = transform.Matrix();
-        Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-        float aspect = (float) imageExtent.width / imageExtent.height;
-        Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
-        // Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
-        InstanceUboData uboData = {
-            .MVP = (proj * view * model).Transposed(),
-        };
-        memcpy(renderable.ubo.mapping, &uboData, sizeof(uboData));
-    };
 };
-AssetManager makeAssetManager(uint32_t nObjects) {
-    AssetManager ret;
-    ret.vlk = makeGraphicsContext();
-    ret.instanceDescriptorPool = makeTypedDescriptorPool(ret.vlk, std::to_array({
-        vk::DescriptorSetLayoutBinding {
-            .binding = 0,
-            .descriptorType = vk::DescriptorType::eUniformBuffer,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eVertex,
-            .pImmutableSamplers = nullptr,
-        },
-    }), nObjects);
-    return ret;
-}
 
 struct ForwardRenderPass {
     // TODO move ownership here
@@ -1492,7 +1496,7 @@ struct ForwardRenderPass {
 
     void renderOne(
         const vk::CommandBuffer& commandBuffer,
-        const AssetManager::RenderableInstance& renderable
+        const RenderablePool::Instance& renderable
     ) {
         const Mesh& mesh = renderable.mesh;
         if (lastVertexBuffer != mesh.vertexBuffer || lastIndexBuffer != mesh.indexBuffer) {
@@ -1562,7 +1566,7 @@ struct ForwardRenderPass {
 
 struct StaticObject {
     Transform transform;
-    AssetManager::RenderableInstance renderable;
+    RenderablePool::Instance renderable;
 };
 
 struct Player {
@@ -1619,14 +1623,16 @@ public:
 
 class Scene1 : public Scene {
     GraphicsContext* vlk;
-    AssetManager* assets;
+    AssetPool* assets;
+    RenderablePool renderablePool;
 
     std::vector<StaticObject> sceneObjects;
     std::vector<Player> players;
     Pipeline graphicsPipeline;
 
 public:
-    Scene1(GraphicsContext* vlk, AssetManager* assets) : vlk(vlk), assets(assets) {}
+    Scene1(GraphicsContext* vlk, AssetPool* assets)
+        : vlk(vlk), assets(assets), renderablePool(vlk, 501) {}
 
     void init() {
         constexpr size_t nCubes = 500;
@@ -1634,7 +1640,7 @@ public:
         const auto whiteMaterial = assets->makeUnlitMaterial("textures/white.png");
         const auto cubeMesh = assets->makeMesh("models/cube.obj");
         const auto planeMesh = assets->makeMesh("models/plane.obj");
-        graphicsPipeline = assets->makePipeline(brickMaterial, vlk->renderPass, 0);
+        graphicsPipeline = renderablePool.makePipeline(brickMaterial, vlk->renderPass, 0);
 
         for (size_t i = 0; i < nCubes; i++) {
             sceneObjects.push_back({
@@ -1643,7 +1649,7 @@ public:
                     .rotation = Quaternion::Identity(),
                     .scale = Vector3(1),
                 },
-                .renderable = assets->makeRenderable(cubeMesh, brickMaterial),
+                .renderable = renderablePool.alloc(cubeMesh, brickMaterial),
             });
         }
         sceneObjects.push_back({
@@ -1652,7 +1658,7 @@ public:
                 .rotation = Quaternion::Identity(),
                 .scale = Vector3(10),
             },
-            .renderable = assets->makeRenderable(planeMesh, whiteMaterial),
+            .renderable = renderablePool.alloc(planeMesh, whiteMaterial),
         });
 
         players.push_back({
@@ -1674,7 +1680,7 @@ public:
 private:
     void render(vk::CommandBuffer commandBuffer, vk::Framebuffer framebuffer) {
         applySystem([&](const auto& e) {
-            assets->updateUbo(e.renderable, e.transform, players[0].transform, vlk->swapchain.info.imageExtent);
+            e.renderable.updateUbo(e.transform, players[0].transform, vlk->swapchain.info.imageExtent);
         }, sceneObjects);
         const auto clearColors = std::to_array<vk::ClearValue>({
             {
@@ -1799,8 +1805,8 @@ public:
 };
 
 int main() {
-    auto assets = makeAssetManager(501);
-    auto& vlk = assets.vlk;
+    auto vlk = makeGraphicsContext();
+    AssetPool assets {&vlk};
 
     Scene1 scene {&vlk, &assets};
     scene.init();
