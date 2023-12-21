@@ -1683,7 +1683,8 @@ struct Player {
         constexpr float airAccel = 300;
         constexpr float maxSpeed = 3.0;
         constexpr float airMaxSpeed = 0.3;
-        transform.rotation = Quaternion::Euler(euler += input::get_rotation(window) * 3 * dt);
+        // transform.rotation = Quaternion::Euler(euler += input::get_rotation(window) * 3 * dt);
+        transform.rotation = Quaternion::Euler(euler = getMousePos(window) * 0.001);
         const Vector3 rawMove = input::get_move(window);
         const Vector2 move = Vector2::Rotate(rawMove.xy().SafeNormalized(), euler.z) * dt;
         const bool touchingGround = transform.position.z == 0;
@@ -1714,6 +1715,11 @@ struct Player {
             transform.position.z = 0;
             velocity.z = 0;
         }
+    }
+    static Vector3 getMousePos(GLFWwindow* window) {
+        double x, y;
+        glfwGetCursorPos(window, &x, &y);
+        return Vector3(-y, 0, -x);
     }
 };
 
@@ -1814,6 +1820,11 @@ private:
 
 int main() {
     auto vlk = makeGraphicsContext();
+    if (glfwRawMouseMotionSupported()) {
+        prn("RawMouseMotion");
+        glfwSetInputMode(vlk.window.get(), GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+    }
+    glfwSetInputMode(vlk.window.get(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     AssetPool assets {&vlk};
 
     Scene1 scene {&vlk, &assets};
