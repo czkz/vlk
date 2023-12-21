@@ -1721,7 +1721,7 @@ class Scene1 : public Scene {
     GraphicsContext* vlk;
     AssetPool* assets;
     RenderablePool renderablePool;
-    CollisionGrid collisionGrid;
+    physics::CollisionGrid collisionGrid;
 
     std::vector<StaticObject> sceneObjects;
     std::vector<Player> players;
@@ -1773,7 +1773,9 @@ public:
             player.update(dt, vlk->window.get());
         }, players);
         applySystem([&](auto& player) {
-            if (collisionGrid.checkCollision(player.transform.position, player.velocity, 0.20)) { prn(time); }
+            if (const auto cp = collisionGrid.checkCollision(player.transform.position, 0.20)) {
+                physics::resolveCollision(player.transform.position, player.velocity, *cp);
+            }
         }, players);
         render(commandBuffer, framebuffer);
     }
