@@ -17,6 +17,7 @@
 #include "load_image.h"
 #include "input.h"
 #include "load_obj.h"
+#include "physics.h"
 
 struct ImageAttachment {
     vk::UniqueImage image;
@@ -1720,6 +1721,7 @@ class Scene1 : public Scene {
     GraphicsContext* vlk;
     AssetPool* assets;
     RenderablePool renderablePool;
+    CollisionGrid collisionGrid;
 
     std::vector<StaticObject> sceneObjects;
     std::vector<Player> players;
@@ -1746,6 +1748,7 @@ public:
                 },
                 .renderable = renderablePool.alloc(cubeMesh, brickMaterial),
             });
+            collisionGrid.add(sceneObjects.back().transform.position.xy());
         }
         sceneObjects.push_back({
             .transform = {
@@ -1768,6 +1771,9 @@ public:
         (void) frameNumber;
         applySystem([&](auto& player) {
             player.update(dt, vlk->window.get());
+        }, players);
+        applySystem([&](auto& player) {
+            if (collisionGrid.checkCollision(player.transform.position, player.velocity, 0.20)) { prn(time); }
         }, players);
         render(commandBuffer, framebuffer);
     }
