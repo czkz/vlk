@@ -433,7 +433,8 @@ struct GraphicsContext {
             }
         }
         return device->createDescriptorPoolUnique({
-            .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+            // .flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+            .flags = {},
             .maxSets = (uint32_t) count,
             .poolSizeCount = (uint32_t) poolSizes.size(),
             .pPoolSizes = count == 1 ? poolSizes.data() : poolSizesVec.data(),

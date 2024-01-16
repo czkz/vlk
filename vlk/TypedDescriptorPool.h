@@ -5,10 +5,11 @@
 struct TypedDescriptorPool {
     const GraphicsContext* vlk;
     vk::UniqueDescriptorSetLayout descriptorSetLayout;
+    std::vector<vk::DescriptorPoolSize> poolSizes;
     std::vector<vk::UniqueDescriptorPool> descriptorPools;
 public:
-    vk::UniqueDescriptorSet alloc() const {
-        return std::move(vlk->device->allocateDescriptorSetsUnique({
+    vk::DescriptorSet alloc() const {
+        return std::move(vlk->device->allocateDescriptorSets({
             .descriptorPool = descriptorPools.back().get(),
             .descriptorSetCount = 1,
             .pSetLayouts = &descriptorSetLayout.get(),
@@ -39,6 +40,7 @@ inline auto makeTypedDescriptorPool(
     TypedDescriptorPool ret;
     ret.vlk = &vlk;
     ret.descriptorSetLayout = vlk.createDescriptorSetLayoutUnique(bindings);
-    ret.descriptorPools.push_back(vlk.createDescriptorPoolUnique(genPoolSizes(bindings), count));
+    ret.poolSizes = genPoolSizes(bindings);
+    ret.descriptorPools.push_back(vlk.createDescriptorPoolUnique(ret.poolSizes, count));
     return ret;
 }

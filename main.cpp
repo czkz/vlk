@@ -195,8 +195,8 @@ public:
 struct AssetPool {
     std::vector<std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory>> buffers;
     // std::vector<Texture> textures;
-    std::map<std::string_view, TypedDescriptorPool> materialPools;
-    std::vector<vk::UniqueDescriptorSet> descriptorSets;
+    // std::map<vk::DescriptorSetLayout, TypedDescriptorPool> materialPools;
+    // std::vector<vk::UniqueDescriptorSet> descriptorSets;
 };
 
 struct Mesh {
@@ -225,23 +225,26 @@ Mesh makeMesh(GraphicsContext* vlk, AssetPool& assets, std::string_view path) {
 struct Material {
     vk::DescriptorSet descriptorSet;
     vk::DescriptorSetLayout descriptorSetLayout;
-    std::string_view materialTypeId;
 };
-template <typename MaterialType>
-Material makeMaterial(GraphicsContext* vlk, AssetPool& assets, auto&&... resources) {
-    if (!assets.materialPools.contains(MaterialType::id)) {
-        assets.materialPools.emplace(MaterialType::id, makeTypedDescriptorPool(*vlk, MaterialType::descriptorSetLayoutBindings, 1));
+
+struct MaterialType {
+    TypedDescriptorPool descriptorPool;
+    std::vector<vk::DescriptorSetLayoutBinding> descriptorSetLayoutBindings;
+    Material makeMaterial(std::span<const Texture> textures) const {
+        auto descriptorSet = descriptorPool.alloc();
+        updateDescriptorSet(descriptorPool.vlk, descriptorSet, descriptorSetLayoutBindings, textures);
+        Material ret = {
+            .descriptorSet = descriptorSet,
+            .descriptorSetLayout = descriptorPool.descriptorSetLayout.get(),
+        };
+        return ret;
     }
-    const TypedDescriptorPool& descriptorPool = assets.materialPools.at(MaterialType::id);
-    auto descriptorSet = descriptorPool.alloc();
-    updateDescriptorSet<MaterialType>(*vlk, descriptorSet.get(), std::forward<decltype(resources)>(resources)...);
-    Material ret = {
-        .descriptorSet = descriptorSet.get(),
-        .descriptorSetLayout = descriptorPool.descriptorSetLayout.get(),
-        .materialTypeId = MaterialType::id,
+};
+inline auto makeMaterialType(GraphicsContext* vlk, std::span<const vk::DescriptorSetLayoutBinding> bindings) {
+    return MaterialType {
+        .descriptorPool = makeTypedDescriptorPool(*vlk, bindings, 1),
+        .descriptorSetLayoutBindings = std::vector(bindings.begin(), bindings.end()),
     };
-    assets.descriptorSets.push_back(std::move(descriptorSet));
-    return ret;
 }
 
 class ForwardRenderer {
@@ -256,11 +259,10 @@ class ForwardRenderer {
     } swapchainResources;
 
     struct RegisteredMaterialType {
-        vk::UniqueDescriptorSetLayout descriptorSetLayout;
         vk::UniquePipelineLayout pipelineLayout;
         vk::UniquePipeline pipeline;
     };
-    std::map<std::string_view, RegisteredMaterialType> registeredMaterials;
+    std::map<vk::DescriptorSetLayout, RegisteredMaterialType> registeredMaterials;
 
     // TODO abstract away into a ring buffer or something similar
     size_t frameIndex = 0;
@@ -494,13 +496,10 @@ private:
     }
 
 public:
-    template <typename MaterialType>
-    void registerMaterialType() {
-        RegisteredMaterialType resources;
-        resources.descriptorSetLayout = vlk->createDescriptorSetLayoutUnique(MaterialType::descriptorSetLayoutBindings);
-        resources.pipelineLayout = createPipelineLayout(
+    void registerMaterialType(vk::DescriptorSetLayout descriptorSetLayout) {
+        auto pipelineLayout = createPipelineLayout(
             *vlk,
-            std::to_array({resources.descriptorSetLayout.get()}),
+            std::to_array({descriptorSetLayout}),
             std::to_array({
                 vk::PushConstantRange {
                     .stageFlags = vk::ShaderStageFlagBits::eVertex,
@@ -509,8 +508,11 @@ public:
                 }
             })
         );
-        resources.pipeline = makeGraphicsPipeline(*vlk, resources.pipelineLayout.get(), renderPass.get(), 0);
-        registeredMaterials.emplace(MaterialType::id, std::move(resources));
+        auto pipeline = makeGraphicsPipeline(*vlk, pipelineLayout.get(), renderPass.get(), 0);
+        registeredMaterials.emplace(descriptorSetLayout, RegisteredMaterialType {
+            .pipelineLayout = std::move(pipelineLayout),
+            .pipeline = std::move(pipeline),
+        });
     }
 
     void init(GraphicsContext* graphicsContext) {
@@ -537,7 +539,7 @@ public:
             vlk->swapchain.info.imageExtent
         };
         drawCallback([this, &commandRecorder](const Mesh& mesh, const Material& material, const Matrix4& mvp) mutable {
-            const auto& registeredMaterial = registeredMaterials.at(material.materialTypeId);
+            const auto& registeredMaterial = registeredMaterials.at(material.descriptorSetLayout);
             commandRecorder.draw(mesh, registeredMaterial.pipeline.get(), registeredMaterial.pipelineLayout.get(), material, mvp);
         });
         commandRecorder.end();
@@ -570,19 +572,15 @@ public:
 
 };
 
-struct UnlitMaterial {
-    UnlitMaterial() = delete;
-    static constexpr std::string_view id = "unlit";
-    static constexpr auto descriptorSetLayoutBindings = std::to_array({
-        vk::DescriptorSetLayoutBinding {
-            .binding = 0,
-            .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment,
-            .pImmutableSamplers = nullptr,
-        },
-    });
-};
+constexpr auto unlitMaterialBindings = std::to_array({
+    vk::DescriptorSetLayoutBinding {
+        .binding = 0,
+        .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eFragment,
+        .pImmutableSamplers = nullptr,
+    },
+});
 
 int main() {
     GraphicsContext graphicsContext = makeGraphicsContext();
@@ -591,9 +589,11 @@ int main() {
     ForwardRenderer renderer;
     renderer.init(vlk);
 
-    renderer.registerMaterialType<UnlitMaterial>();
+    const auto unlitMaterial = makeMaterialType(vlk, unlitMaterialBindings);
+
+    renderer.registerMaterialType(unlitMaterial.descriptorPool.descriptorSetLayout.get());
     const auto bricksTexture = makeTexture(vlk, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
-    const auto bricksUnlitMaterial = makeMaterial<UnlitMaterial>(vlk, assets, bricksTexture);
+    const auto bricksUnlitMaterial = unlitMaterial.makeMaterial(std::span(&bricksTexture, 1));
 
     const auto cubeMesh = makeMesh(vlk, assets, "models/cube.obj");
 
