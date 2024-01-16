@@ -1,6 +1,6 @@
 #pragma once
-#include "GraphicsContext.h"
-#include "AssetPool.h"
+#include "vlk/GraphicsContext.h"
+#include "vlk/AssetPool.h"
 #include "load_image.h"
 
 struct Texture {
