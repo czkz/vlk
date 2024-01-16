@@ -1,5 +1,6 @@
 #pragma once
 #define VULKAN_HPP_NO_CONSTRUCTORS
+#include <vulkan/vulkan.hpp>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <memory>
@@ -8,7 +9,6 @@
 #include <fstream>
 #include <bit>
 #include <ex.h>
-#include "ImageAttachment.h"
 
 // TODO remove Unique suffix
 struct GraphicsContext {
@@ -370,29 +370,6 @@ struct GraphicsContext {
         }();
         commandBuffer.end();
         return localImage;
-    }
-    auto createImageAttachmentUnique(
-        const vk::ImageCreateInfo& createInfo,
-        vk::MemoryPropertyFlags memoryProperties,
-        vk::ImageAspectFlags aspectMask = vk::ImageAspectFlagBits::eColor
-    ) const {
-        ImageAttachment ret;
-        std::tie(ret.image, ret.deviceMemory) = createImageUnique(createInfo, memoryProperties);
-        ret.imageView = device->createImageViewUnique({
-            .flags = {},
-            .image = ret.image.get(),
-            .viewType = vk::ImageViewType::e2D,
-            .format = createInfo.format,
-            .components = {},
-            .subresourceRange = {
-                .aspectMask = aspectMask,
-                .baseMipLevel = 0,
-                .levelCount = createInfo.mipLevels,
-                .baseArrayLayer = 0,
-                .layerCount = createInfo.arrayLayers,
-            },
-        });
-        return ret;
     }
     auto createShaderModuleUnique(const char* filename) const {
         const auto slurp = [](const char* filename) {

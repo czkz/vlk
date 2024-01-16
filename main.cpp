@@ -1,3 +1,4 @@
+#include "vlk/ImageAttachment.h"
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #include <cstddef>
 // #include "vlk/MappedBuffer.h"
@@ -192,13 +193,6 @@ public:
     }
 };
 
-struct AssetPool {
-    std::vector<std::pair<vk::UniqueBuffer, vk::UniqueDeviceMemory>> buffers;
-    // std::vector<Texture> textures;
-    // std::map<vk::DescriptorSetLayout, TypedDescriptorPool> materialPools;
-    // std::vector<vk::UniqueDescriptorSet> descriptorSets;
-};
-
 struct Mesh {
     vk::Buffer vertexBuffer;
     vk::Buffer indexBuffer;
@@ -208,18 +202,15 @@ struct Mesh {
 };
 Mesh makeMesh(GraphicsContext* vlk, AssetPool& assets, std::string_view path) {
     const auto [vertices, indices] = load_obj(path);
-    auto vertexBuffer = vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices);
-    auto indexBuffer = vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices);
-    Mesh ret = {
-        .vertexBuffer = vertexBuffer.first.get(),
-        .indexBuffer = indexBuffer.first.get(),
+    const auto vertexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices)));
+    const auto indexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices)));
+    return Mesh {
+        .vertexBuffer = vertexBuffer,
+        .indexBuffer = indexBuffer,
         .nVertices = vertices.size(),
         .nIndices = indices.size(),
         .indexed = true,
     };
-    assets.buffers.push_back(std::move(vertexBuffer));
-    assets.buffers.push_back(std::move(indexBuffer));
-    return ret;
 }
 
 struct Material {
@@ -432,7 +423,7 @@ private:
 
     void createSwapchainResources() {
         // TODO should be lazy allocated
-        swapchainResources.colorAttachment = vlk->createImageAttachmentUnique({
+        swapchainResources.colorAttachment = makeImageAttachment(vlk, {
             .flags = {},
             .imageType = vk::ImageType::e2D,
             .format = vlk->swapchain.info.imageFormat,
@@ -450,8 +441,8 @@ private:
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
             .initialLayout = vk::ImageLayout::eUndefined,
-        }, vk::MemoryPropertyFlagBits::eDeviceLocal);
-        swapchainResources.depthAttachment = vlk->createImageAttachmentUnique({
+        }, vk::MemoryPropertyFlagBits::eDeviceLocal, vk::ImageAspectFlagBits::eColor);
+        swapchainResources.depthAttachment = makeImageAttachment(vlk, {
             .flags = {},
             .imageType = vk::ImageType::e2D,
             .format = vk::Format::eD32Sfloat,
@@ -592,7 +583,7 @@ int main() {
     const auto unlitMaterial = makeMaterialType(vlk, unlitMaterialBindings);
 
     renderer.registerMaterialType(unlitMaterial.descriptorPool.descriptorSetLayout.get());
-    const auto bricksTexture = makeTexture(vlk, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
+    const auto bricksTexture = makeTexture(vlk, assets, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
     const auto bricksUnlitMaterial = unlitMaterial.makeMaterial(std::span(&bricksTexture, 1));
 
     const auto cubeMesh = makeMesh(vlk, assets, "models/cube.obj");

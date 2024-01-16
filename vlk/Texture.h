@@ -1,13 +1,15 @@
 #pragma once
 #include "GraphicsContext.h"
+#include "AssetPool.h"
 #include "load_image.h"
 
-// TODO should be TextureResources
-struct Texture : public ImageAttachment {
-    vk::UniqueSampler sampler;
+struct Texture {
+    vk::Image image;
+    vk::ImageView imageView;
+    vk::Sampler sampler;
 };
 
-inline auto makeTexture(GraphicsContext* vlk, std::string_view path, vk::Format format) {
+inline auto makeTexture(GraphicsContext* vlk, AssetPool& assets, std::string_view path, vk::Format format) {
     const int channels = std::map<vk::Format, int> {
         {vk::Format::eR8Srgb,       1},
         {vk::Format::eR8G8Srgb,     2},
@@ -15,24 +17,23 @@ inline auto makeTexture(GraphicsContext* vlk, std::string_view path, vk::Format 
         {vk::Format::eR8G8B8A8Srgb, 4},
     }.at(format);
     const auto img = load_image(path, channels);
-    Texture ret;
     const uint32_t mipLevels = floor(log2(std::max(img.w, img.h))) + 1;
-    std::tie(ret.image, ret.deviceMemory) = vlk->createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels);
-    ret.imageView = vlk->device->createImageViewUnique({
+    const auto image = std::get<vk::Image>(assets.storeTuple(vlk->createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels)));
+    const auto imageView = assets.store(vlk->device->createImageViewUnique({
         .flags = {},
-        .image = ret.image.get(),
+        .image = image,
         .viewType = vk::ImageViewType::e2D,
         .format = format,
         .components = {},
         .subresourceRange = {
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .baseMipLevel = 0,
-            .levelCount = mipLevels,
+            .levelCount = vk::RemainingMipLevels,
             .baseArrayLayer = 0,
-            .layerCount = 1,
+            .layerCount = vk::RemainingArrayLayers,
         },
-    });
-    ret.sampler = vlk->device->createSamplerUnique({
+    }));
+    const auto sampler = assets.store(vlk->device->createSamplerUnique({
         .flags = {},
         .magFilter = vk::Filter::eLinear,
         .minFilter = vk::Filter::eLinear,
@@ -49,6 +50,10 @@ inline auto makeTexture(GraphicsContext* vlk, std::string_view path, vk::Format 
         .maxLod = vk::LodClampNone,
         .borderColor = {},
         .unnormalizedCoordinates = false,
-    });
-    return ret;
+    }));
+    return Texture {
+        .image = image,
+        .imageView = imageView,
+        .sampler = sampler,
+    };
 }

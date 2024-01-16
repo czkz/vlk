@@ -16,8 +16,8 @@ inline void updateTexture(
             .descriptorCount = layoutBinding.descriptorCount,
             .descriptorType = layoutBinding.descriptorType,
             .pImageInfo = std::to_array({vk::DescriptorImageInfo {
-                .sampler = texture.sampler.get(),
-                .imageView = texture.imageView.get(),
+                .sampler = texture.sampler,
+                .imageView = texture.imageView,
                 .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
             }}).data(),
             .pBufferInfo = nullptr,
