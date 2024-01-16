@@ -7,13 +7,13 @@
 
 // TODO too specific
 inline vk::UniquePipeline makeGraphicsPipeline(
-    GraphicsContext& vlk,
+    const GraphicsContext* vlk,
     vk::PipelineLayout pipelineLayout,
     vk::RenderPass renderPass,
     uint32_t subpass
 ) {
-    const auto vertShader = vlk.createShaderModuleUnique("shaders/triangle.vert.spv");
-    const auto fragShader = vlk.createShaderModuleUnique("shaders/triangle.frag.spv");
+    const auto vertShader = vlk->createShaderModuleUnique("shaders/triangle.vert.spv");
+    const auto fragShader = vlk->createShaderModuleUnique("shaders/triangle.frag.spv");
     struct Vertex {
         Vector3 pos;
         Vector2 uv;
@@ -39,8 +39,8 @@ inline vk::UniquePipeline makeGraphicsPipeline(
         },
     });
     const auto shaderStages = std::to_array({
-        vlk.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
-        vlk.genShaderStageCreateInfo(vk::ShaderStageFlagBits::eFragment, fragShader),
+        vlk->genShaderStageCreateInfo(vk::ShaderStageFlagBits::eVertex, vertShader),
+        vlk->genShaderStageCreateInfo(vk::ShaderStageFlagBits::eFragment, fragShader),
     });
     vk::PipelineVertexInputStateCreateInfo vertexInputState = {
         .flags = {},
@@ -77,7 +77,7 @@ inline vk::UniquePipeline makeGraphicsPipeline(
     // TODO maxSampleCount
     vk::PipelineMultisampleStateCreateInfo multisampleState = {
         .flags = {},
-        .rasterizationSamples = vlk.props.maxSampleCount,
+        .rasterizationSamples = vlk->props.maxSampleCount,
         .sampleShadingEnable = VK_FALSE,
         .minSampleShading = 1,
         .pSampleMask = nullptr,
@@ -142,11 +142,11 @@ inline vk::UniquePipeline makeGraphicsPipeline(
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1,
     };
-    return vlk.device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
+    return vlk->device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
 }
 
 class ForwardRenderer {
-    GraphicsContext* vlk;
+    const GraphicsContext* vlk;
     vk::SampleCountFlagBits sampleCount;
     vk::UniqueRenderPass renderPass;
     // TODO rename RenderPassResources?
@@ -411,7 +411,7 @@ private:
 public:
     void registerMaterialType(vk::DescriptorSetLayout descriptorSetLayout) {
         auto pipelineLayout = createPipelineLayout(
-            *vlk,
+            vlk,
             std::to_array({descriptorSetLayout}),
             std::to_array({
                 vk::PushConstantRange {
@@ -421,14 +421,14 @@ public:
                 }
             })
         );
-        auto pipeline = makeGraphicsPipeline(*vlk, pipelineLayout.get(), renderPass.get(), 0);
+        auto pipeline = makeGraphicsPipeline(vlk, pipelineLayout.get(), renderPass.get(), 0);
         registeredMaterials.emplace(descriptorSetLayout, RegisteredMaterialType {
             .pipelineLayout = std::move(pipelineLayout),
             .pipeline = std::move(pipeline),
         });
     }
 
-    void init(GraphicsContext* graphicsContext) {
+    void init(const GraphicsContext* graphicsContext) {
         vlk = graphicsContext;
         sampleCount = vlk->props.maxSampleCount;
         createRenderPass();

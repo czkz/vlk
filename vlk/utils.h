@@ -2,11 +2,11 @@
 #include "GraphicsContext.h"
 
 inline vk::UniquePipelineLayout createPipelineLayout(
-    GraphicsContext& vlk,
+    const GraphicsContext* vlk,
     std::span<const vk::DescriptorSetLayout> descriptorSetLayouts,
     std::span<const vk::PushConstantRange> pushConstantRanges
 ) {
-    return vlk.device->createPipelineLayoutUnique({
+    return vlk->device->createPipelineLayoutUnique({
         .flags = {},
         .setLayoutCount = (uint32_t) descriptorSetLayouts.size(),
         .pSetLayouts = descriptorSetLayouts.data(),

@@ -36,7 +36,7 @@ struct GraphicsContext {
         vk::SwapchainCreateInfoKHR         info;
         vk::UniqueSwapchainKHR             swapchain;
         std::vector<vk::UniqueImageView>   imageViews;
-    } swapchain;
+    } mutable swapchain;
 
     vk::UniqueCommandPool frameCommandPool;
 
@@ -418,7 +418,7 @@ struct GraphicsContext {
         });
     }
 
-    void recreateSwapchainUnique() {
+    void recreateSwapchainUnique() const {
         swapchain.info = [&] {
             const auto caps = physicalDevice.getSurfaceCapabilitiesKHR(surface.get());
             const auto formats = physicalDevice.getSurfaceFormatsKHR(surface.get());

@@ -23,9 +23,9 @@ struct MaterialType {
     }
 };
 
-inline auto makeMaterialType(GraphicsContext* vlk, std::span<const vk::DescriptorSetLayoutBinding> bindings) {
+inline auto makeMaterialType(const GraphicsContext* vlk, std::span<const vk::DescriptorSetLayoutBinding> bindings) {
     return MaterialType {
-        .descriptorPool = makeTypedDescriptorPool(*vlk, bindings, 1),
+        .descriptorPool = makeTypedDescriptorPool(vlk, bindings, 1),
         .descriptorSetLayoutBindings = std::vector(bindings.begin(), bindings.end()),
     };
 }

@@ -9,7 +9,7 @@ struct Texture {
     vk::Sampler sampler;
 };
 
-inline auto makeTexture(GraphicsContext* vlk, AssetPool& assets, std::string_view path, vk::Format format) {
+inline auto makeTexture(const GraphicsContext* vlk, AssetPool& assets, std::string_view path, vk::Format format) {
     const int channels = std::map<vk::Format, int> {
         {vk::Format::eR8Srgb,       1},
         {vk::Format::eR8G8Srgb,     2},

@@ -15,8 +15,8 @@ constexpr auto unlitMaterialBindings = std::to_array({
 });
 
 int main() {
-    GraphicsContext graphicsContext = makeGraphicsContext();
-    GraphicsContext* vlk = &graphicsContext;
+    const GraphicsContext graphicsContext = makeGraphicsContext();
+    const GraphicsContext* vlk = &graphicsContext;
     AssetPool assets;
     ForwardRenderer renderer;
     renderer.init(vlk);

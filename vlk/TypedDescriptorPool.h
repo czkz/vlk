@@ -18,7 +18,7 @@ public:
 };
 
 inline auto makeTypedDescriptorPool(
-    const GraphicsContext& vlk,
+    const GraphicsContext* vlk,
     std::span<const vk::DescriptorSetLayoutBinding> bindings,
     size_t count
 ) {
@@ -37,10 +37,12 @@ inline auto makeTypedDescriptorPool(
         }
         return ret;
     };
-    TypedDescriptorPool ret;
-    ret.vlk = &vlk;
-    ret.descriptorSetLayout = vlk.createDescriptorSetLayoutUnique(bindings);
-    ret.poolSizes = genPoolSizes(bindings);
-    ret.descriptorPools.push_back(vlk.createDescriptorPoolUnique(ret.poolSizes, count));
+    TypedDescriptorPool ret = {
+        .vlk = vlk,
+        .descriptorSetLayout = vlk->createDescriptorSetLayoutUnique(bindings),
+        .poolSizes = genPoolSizes(bindings),
+        .descriptorPools = {},
+    };
+    ret.descriptorPools.push_back(vlk->createDescriptorPoolUnique(ret.poolSizes, count));
     return ret;
 }
