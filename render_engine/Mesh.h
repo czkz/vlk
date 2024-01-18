@@ -13,8 +13,8 @@ struct Mesh {
 
 inline Mesh makeMesh(const GraphicsContext* vlk, AssetPool& assets, std::string_view path) {
     const auto [vertices, indices] = load_obj(path);
-    const auto vertexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eVertexBuffer, vertices)));
-    const auto indexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBufferUnique(vk::BufferUsageFlagBits::eIndexBuffer, indices)));
+    const auto vertexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBuffer(vk::BufferUsageFlagBits::eVertexBuffer, vertices)));
+    const auto indexBuffer = std::get<vk::Buffer>(assets.storeTuple(vlk->createDeviceLocalBuffer(vk::BufferUsageFlagBits::eIndexBuffer, indices)));
     return Mesh {
         .vertexBuffer = vertexBuffer,
         .indexBuffer = indexBuffer,

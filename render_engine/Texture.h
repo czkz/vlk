@@ -18,7 +18,7 @@ inline auto makeTexture(const GraphicsContext* vlk, AssetPool& assets, std::stri
     }.at(format);
     const auto img = load_image(path, channels);
     const uint32_t mipLevels = floor(log2(std::max(img.w, img.h))) + 1;
-    const auto image = std::get<vk::Image>(assets.storeTuple(vlk->createDeviceLocalImageUnique(img, img.w, img.h, format, mipLevels)));
+    const auto image = std::get<vk::Image>(assets.storeTuple(vlk->createDeviceLocalImage(img, img.w, img.h, format, mipLevels)));
     const auto imageView = assets.store(vlk->device->createImageViewUnique({
         .flags = {},
         .image = image,

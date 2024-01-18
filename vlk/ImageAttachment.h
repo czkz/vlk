@@ -13,7 +13,7 @@ inline auto makeImageAttachment(
     vk::MemoryPropertyFlags memoryProperties,
     vk::ImageAspectFlags aspectMask
 ) {
-    auto [image, deviceMemory] = vlk->createImageUnique(createInfo, memoryProperties);
+    auto [image, deviceMemory] = vlk->createImage(createInfo, memoryProperties);
     auto imageView = vlk->device->createImageViewUnique({
         .flags = {},
         .image = image.get(),

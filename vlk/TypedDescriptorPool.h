@@ -39,10 +39,10 @@ inline auto makeTypedDescriptorPool(
     };
     TypedDescriptorPool ret = {
         .vlk = vlk,
-        .descriptorSetLayout = vlk->createDescriptorSetLayoutUnique(bindings),
+        .descriptorSetLayout = vlk->createDescriptorSetLayout(bindings),
         .poolSizes = genPoolSizes(bindings),
         .descriptorPools = {},
     };
-    ret.descriptorPools.push_back(vlk->createDescriptorPoolUnique(ret.poolSizes, count));
+    ret.descriptorPools.push_back(vlk->createDescriptorPool(ret.poolSizes, count));
     return ret;
 }

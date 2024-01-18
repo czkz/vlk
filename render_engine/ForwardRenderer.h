@@ -12,8 +12,8 @@ inline vk::UniquePipeline makeGraphicsPipeline(
     vk::RenderPass renderPass,
     uint32_t subpass
 ) {
-    const auto vertShader = vlk->createShaderModuleUnique("shaders/triangle.vert.spv");
-    const auto fragShader = vlk->createShaderModuleUnique("shaders/triangle.frag.spv");
+    const auto vertShader = vlk->createShaderModule("shaders/triangle.vert.spv");
+    const auto fragShader = vlk->createShaderModule("shaders/triangle.frag.spv");
     struct Vertex {
         Vector3 pos;
         Vector2 uv;
@@ -404,7 +404,7 @@ private:
 
     void onWindowResized() {
         vlk->device->waitIdle();
-        vlk->recreateSwapchainUnique();
+        vlk->recreateSwapchain();
         createSwapchainResources();
     }
 

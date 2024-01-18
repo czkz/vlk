@@ -10,7 +10,6 @@
 #include <bit>
 #include <ex.h>
 
-// TODO remove Unique suffix
 struct GraphicsContext {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window = {nullptr, glfwDestroyWindow};
     vk::UniqueInstance instance;
@@ -62,7 +61,7 @@ struct GraphicsContext {
         }
         throw ex::runtime("couldn't find suitable memory type");
     }
-    auto createBufferUnique(
+    auto createBuffer(
         size_t nBytes,
         vk::BufferUsageFlags usage,
         vk::MemoryPropertyFlags properties
@@ -83,7 +82,7 @@ struct GraphicsContext {
         device->bindBufferMemory(buffer.get(), memory.get(), 0);
         return std::pair(std::move(buffer), std::move(memory));
     }
-    auto createImageUnique(
+    auto createImage(
         const vk::ImageCreateInfo& createInfo,
         vk::MemoryPropertyFlags memoryProperties
     ) const {
@@ -102,8 +101,8 @@ struct GraphicsContext {
         memcpy(mapped, bytes.data(), bytes.size_bytes());
         device->unmapMemory(memory.get());
     }
-    auto createStagingBufferUnique(const auto& data) const {
-        auto ret = createBufferUnique(
+    auto createStagingBuffer(const auto& data) const {
+        auto ret = createBuffer(
             std::span(data).size_bytes(),
             vk::BufferUsageFlagBits::eTransferSrc,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
@@ -191,10 +190,10 @@ struct GraphicsContext {
             },
         });
     }
-    auto createDeviceLocalBufferUnique(vk::BufferUsageFlags usage, const auto& data) const {
+    auto createDeviceLocalBuffer(vk::BufferUsageFlags usage, const auto& data) const {
         const auto bytes = std::as_bytes(std::span(data));
-        auto stagingBuffer = createStagingBufferUnique(bytes);
-        auto localBuffer = createBufferUnique(
+        auto stagingBuffer = createStagingBuffer(bytes);
+        auto localBuffer = createBuffer(
             bytes.size(),
             vk::BufferUsageFlagBits::eTransferDst | usage,
             vk::MemoryPropertyFlagBits::eDeviceLocal
@@ -202,16 +201,16 @@ struct GraphicsContext {
         cmdCopyBuffer(tempCommandBuffer(), stagingBuffer.first, localBuffer.first, bytes.size());
         return localBuffer;
     }
-    auto createDeviceLocalImageUnique(
+    auto createDeviceLocalImage(
         const auto& imageData,
         size_t w,
         size_t h,
         const vk::Format& format,
         uint32_t mipLevels
     ) const {
-        const auto stagingBuffer = createStagingBufferUnique(imageData);
+        const auto stagingBuffer = createStagingBuffer(imageData);
         using usage = vk::ImageUsageFlagBits;
-        auto localImage = createImageUnique({
+        auto localImage = createImage({
             .flags = {},
             .imageType = vk::ImageType::e2D,
             .format = format,
@@ -371,7 +370,7 @@ struct GraphicsContext {
         commandBuffer.end();
         return localImage;
     }
-    auto createShaderModuleUnique(const char* filename) const {
+    auto createShaderModule(const char* filename) const {
         const auto slurp = [](const char* filename) {
             std::ifstream f(filename);
             return std::string(std::istreambuf_iterator<char>(f), {});
@@ -393,14 +392,14 @@ struct GraphicsContext {
         };
         return createInfo;
     }
-    auto createDescriptorSetLayoutUnique(std::span<const vk::DescriptorSetLayoutBinding> bindings) const {
+    auto createDescriptorSetLayout(std::span<const vk::DescriptorSetLayoutBinding> bindings) const {
         return device->createDescriptorSetLayoutUnique({
             .flags = {},
             .bindingCount = (uint32_t) bindings.size(),
             .pBindings = bindings.data(),
         });
     }
-    vk::UniqueDescriptorPool createDescriptorPoolUnique(std::span<const vk::DescriptorPoolSize> poolSizes, size_t count) const {
+    vk::UniqueDescriptorPool createDescriptorPool(std::span<const vk::DescriptorPoolSize> poolSizes, size_t count) const {
         std::vector<vk::DescriptorPoolSize> poolSizesVec;
         if (count != 1) {
             poolSizesVec.reserve(poolSizes.size());
@@ -418,7 +417,7 @@ struct GraphicsContext {
         });
     }
 
-    void recreateSwapchainUnique() const {
+    void recreateSwapchain() const {
         swapchain.info = [&] {
             const auto caps = physicalDevice.getSurfaceCapabilitiesKHR(surface.get());
             const auto formats = physicalDevice.getSurfaceFormatsKHR(surface.get());
@@ -784,7 +783,7 @@ inline auto makeGraphicsContext() {
         .queueFamilyIndex = vlk.props.graphicsQueueFamily,
     });
 
-    vlk.recreateSwapchainUnique();
+    vlk.recreateSwapchain();
 
     vlk.frameCommandPool = vlk.device->createCommandPoolUnique({
         .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
