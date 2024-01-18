@@ -37,4 +37,4 @@ inline void updateDescriptorSet(
         assert(bindings[i].descriptorType == vk::DescriptorType::eCombinedImageSampler);
         updateTexture(vlk, descriptorSet, bindings[i], textures[i]);
     }
-};
+}
