@@ -1,6 +1,7 @@
 #pragma once
 #include "vlk/GraphicsContext.h"
 #include "vlk/ImageAttachment.h"
+#include "vlk/WindowRenderTarget.h"
 #include "vlk/utils.h"
 #include "Mesh.h"
 #include "Material.h"
@@ -145,11 +146,15 @@ inline vk::UniquePipeline makeGraphicsPipeline(
     return vlk->device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
 }
 
-class ForwardRenderer {
-    const GraphicsContext* vlk;
+class ForwardRenderer : public WindowRenderTarget<ForwardRenderer> {
+
+    vk::Extent2D currentImageExtent;
+    vk::Format currentImageFormat;
+    std::span<const vk::ImageView> currentImageViews;
+
     vk::SampleCountFlagBits sampleCount;
     vk::UniqueRenderPass renderPass;
-    // TODO rename RenderPassResources?
+    // TODO rename FramebufferResources? / InternalResources
     struct SwapchainResources {
         ImageAttachment colorAttachment;
         ImageAttachment depthAttachment;
@@ -161,9 +166,6 @@ class ForwardRenderer {
         vk::UniquePipeline pipeline;
     };
     std::map<vk::DescriptorSetLayout, RegisteredMaterialType> registeredMaterials;
-
-    // TODO abstract away into a ring buffer or something similar
-    size_t frameIndex = 0;
 
 private:
     class CommandRecorder {
@@ -261,11 +263,13 @@ private:
         }
     };
 
+    std::optional<CommandRecorder> commandRecorder;
+
 private:
     void createRenderPass() {
         vk::AttachmentDescription colorAttachmentDesc = {
             .flags = {},
-            .format = vlk->swapchain.info.imageFormat,
+            .format = currentImageFormat,
             .samples = sampleCount,
             .loadOp = vk::AttachmentLoadOp::eClear,
             .storeOp = vk::AttachmentStoreOp::eDontCare,
@@ -287,7 +291,7 @@ private:
         };
         vk::AttachmentDescription colorResolveDesc = {
             .flags = {},
-            .format = vlk->swapchain.info.imageFormat,
+            .format = currentImageFormat,
             .samples = vk::SampleCountFlagBits::e1,
             .loadOp = vk::AttachmentLoadOp::eDontCare,
             .storeOp = vk::AttachmentStoreOp::eStore,
@@ -348,10 +352,10 @@ private:
         swapchainResources.colorAttachment = makeImageAttachment(vlk, {
             .flags = {},
             .imageType = vk::ImageType::e2D,
-            .format = vlk->swapchain.info.imageFormat,
+            .format = currentImageFormat,
             .extent = {
-                vlk->swapchain.info.imageExtent.width,
-                vlk->swapchain.info.imageExtent.height,
+                currentImageExtent.width,
+                currentImageExtent.height,
                 1
             },
             .mipLevels = 1,
@@ -369,8 +373,8 @@ private:
             .imageType = vk::ImageType::e2D,
             .format = vk::Format::eD32Sfloat,
             .extent = {
-                .width = vlk->swapchain.info.imageExtent.width,
-                .height = vlk->swapchain.info.imageExtent.height,
+                .width = currentImageExtent.width,
+                .height = currentImageExtent.height,
                 .depth = 1,
             },
             .mipLevels = 1,
@@ -384,31 +388,67 @@ private:
             .initialLayout = vk::ImageLayout::eUndefined,
         }, vk::MemoryPropertyFlagBits::eDeviceLocal, vk::ImageAspectFlagBits::eDepth);
         swapchainResources.framebuffers.clear();
-        for (const auto& resolveImageView : vlk->swapchain.imageViews) {
+        for (const auto& resolveImageView : currentImageViews) {
             const auto attachments = std::to_array({
                 swapchainResources.colorAttachment.imageView.get(),
                 swapchainResources.depthAttachment.imageView.get(),
-                resolveImageView.get(),
+                resolveImageView,
             });
             swapchainResources.framebuffers.push_back(vlk->device->createFramebufferUnique({
                 .flags = {},
                 .renderPass = renderPass.get(),
                 .attachmentCount = attachments.size(),
                 .pAttachments = attachments.data(),
-                .width = vlk->swapchain.info.imageExtent.width,
-                .height = vlk->swapchain.info.imageExtent.height,
+                .width = currentImageExtent.width,
+                .height = currentImageExtent.height,
                 .layers = 1,
             }));
         }
     }
 
-    void onWindowResized() {
-        vlk->device->waitIdle();
-        vlk->recreateSwapchain();
+protected:
+    friend WindowRenderTarget;
+    void notifySetRenderTarget(
+        vk::Extent2D extent,
+        vk::Format format,
+        std::span<const vk::ImageView> imageViews
+    ) {
+        currentImageExtent = extent;
+        currentImageFormat = format;
+        currentImageViews = imageViews;
+        createRenderPass();
+        createSwapchainResources();
+    }
+    void notifyUpdateImageExtent(vk::Extent2D extent) {
+        currentImageExtent = extent;
+        createSwapchainResources();
+    }
+    void notifyUpdateImageFormat(vk::Format format) {
+        currentImageFormat = format;
+        createRenderPass();
         createSwapchainResources();
     }
 
+    void notifyStartFrame(vk::CommandBuffer commandBuffer, size_t imageIndex) {
+        commandRecorder = CommandRecorder {
+            commandBuffer,
+            renderPass.get(),
+            swapchainResources.framebuffers[imageIndex].get(),
+            currentImageExtent,
+        };
+    }
+
+    void notifyEndFrame() {
+        commandRecorder.value().end();
+    }
+
 public:
+    explicit ForwardRenderer(const GraphicsContext* vlk, const WindowSurface* window) : WindowRenderTarget(vlk, window) {
+        sampleCount = vlk->props.maxSampleCount;
+        // TODO this is ugly
+        init();
+    }
+
     void registerMaterialType(vk::DescriptorSetLayout descriptorSetLayout) {
         auto pipelineLayout = createPipelineLayout(
             vlk,
@@ -428,58 +468,8 @@ public:
         });
     }
 
-    void init(const GraphicsContext* graphicsContext) {
-        vlk = graphicsContext;
-        sampleCount = vlk->props.maxSampleCount;
-        createRenderPass();
-        createSwapchainResources();
-    }
-
-    void doFrame(auto&& drawCallback) try {
-        const auto& currentFrame = vlk->framesInFlight[frameIndex++ % vlk->maxFramesInFlight];
-        (void) vlk->device->waitForFences(currentFrame.inFlightFence.get(), VK_TRUE, -1);
-        const uint32_t imageIndex = vlk->device->acquireNextImageKHR(vlk->swapchain.swapchain.get(), -1, currentFrame.imageAvailableSemaphore.get(), nullptr).value;
-        // vkAcquireNextImageKHR may return vk::Result::eSuboptimalKHR.
-        // This is not an error, which means that
-        // imageAvailableSemaphore was signaled,
-        // so we can't return early without waiting on it
-        vlk->device->resetFences(currentFrame.inFlightFence.get());
-
-        CommandRecorder commandRecorder {
-            currentFrame.commandBuffer.get(),
-            renderPass.get(),
-            swapchainResources.framebuffers[imageIndex].get(),
-            vlk->swapchain.info.imageExtent
-        };
-        drawCallback([this, &commandRecorder](const Mesh& mesh, const Material& material, const Matrix4& mvp) mutable {
-            const auto& registeredMaterial = registeredMaterials.at(material.descriptorSetLayout);
-            commandRecorder.draw(mesh, registeredMaterial.pipeline.get(), registeredMaterial.pipelineLayout.get(), material, mvp);
-        });
-        commandRecorder.end();
-
-        constexpr vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
-        vlk->graphicsQueue.submit(vk::SubmitInfo {
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &currentFrame.imageAvailableSemaphore.get(),
-            .pWaitDstStageMask = waitStages,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &currentFrame.commandBuffer.get(),
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &currentFrame.renderFinishedSemaphore.get(),
-        }, currentFrame.inFlightFence.get());
-        const vk::Result presentRes = vlk->presentQueue.presentKHR(vk::PresentInfoKHR {
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &currentFrame.renderFinishedSemaphore.get(),
-            .swapchainCount = 1,
-            .pSwapchains = &vlk->swapchain.swapchain.get(),
-            .pImageIndices = &imageIndex,
-            .pResults = nullptr,
-        });
-        if (presentRes == vk::Result::eSuboptimalKHR) {
-            onWindowResized();
-        }
-    } catch (const vk::OutOfDateKHRError& e) {
-        // Can be thrown from vkAcquireNextImageKHR or vkQueuePresentKHR
-        onWindowResized();
+    void draw(const Mesh& mesh, const Material& material, const Matrix4& mvp) {
+        const auto& registeredMaterial = registeredMaterials.at(material.descriptorSetLayout);
+        commandRecorder.value().draw(mesh, registeredMaterial.pipeline.get(), registeredMaterial.pipelineLayout.get(), material, mvp);
     }
 };

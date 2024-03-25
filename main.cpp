@@ -3,6 +3,7 @@
 #include <Transform.h>
 #include "FrameCounter.h"
 #include "render_engine/ForwardRenderer.h"
+#include "vlk/WindowRenderTarget.h"
 
 constexpr auto unlitMaterialBindings = std::to_array({
     vk::DescriptorSetLayoutBinding {
@@ -15,11 +16,13 @@ constexpr auto unlitMaterialBindings = std::to_array({
 });
 
 int main() {
-    const GraphicsContext graphicsContext = makeGraphicsContext();
+    glfwInit();
+    const vk::UniqueInstance instance = createInstance();
+    const WindowSurface window = createWindowSurface(instance.get());
+    const GraphicsContext graphicsContext = makeGraphicsContext(instance.get(), window.surface.get());
     const GraphicsContext* vlk = &graphicsContext;
     AssetPool assets;
-    ForwardRenderer renderer;
-    renderer.init(vlk);
+    ForwardRenderer renderer (vlk, &window);
 
     const auto unlitMaterial = makeMaterialType(vlk, unlitMaterialBindings);
 
@@ -44,25 +47,22 @@ int main() {
     };
 
     const auto drawFrame = [&]() {
-        renderer.doFrame([&](auto&& draw) {
+        if (renderer.startFrame()) {
             for (const auto& transform : cubes) {
                 const Matrix4 model = transform.Matrix();
                 const Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-                const float aspect = (float) vlk->swapchain.info.imageExtent.width / vlk->swapchain.info.imageExtent.height;
+                const float aspect = (float) renderer.swapchain.info.imageExtent.width / renderer.swapchain.info.imageExtent.height;
                 const Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
                 // const Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
                 const Matrix4 mvp = (proj * view * model).Transposed();
-                draw(cubeMesh, bricksUnlitMaterial, mvp);
+                renderer.draw(cubeMesh, bricksUnlitMaterial, mvp);
             }
-        });
+            renderer.endFrame();
+        }
     };
 
 
     const auto runWindowLoop = [](GLFWwindow* window, auto&& drawFrame) {
-        for (size_t i = 0; i < 100; i++) {
-            glfwPollEvents();
-            drawFrame();
-        }
         FrameCounter frameCounter;
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
@@ -86,7 +86,7 @@ int main() {
         }
     };
 
-    runWindowLoop(vlk->window.get(), drawFrame);
+    runWindowLoop(window.window.get(), drawFrame);
     vlk->device->waitIdle();
 }
 
