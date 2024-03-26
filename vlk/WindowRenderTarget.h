@@ -27,7 +27,7 @@ inline auto createWindowSurface(vk::Instance instance) {
 };
 
 class WindowRenderTarget {
-public: // TODO private
+private:
     const GraphicsContext* vlk;
     const WindowSurface* windowSurface;
 

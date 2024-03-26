@@ -55,7 +55,7 @@ int main() {
             for (const auto& transform : cubes) {
                 const Matrix4 model = transform.Matrix();
                 const Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-                const float aspect = (float) renderTarget.swapchain.info.imageExtent.width / renderTarget.swapchain.info.imageExtent.height;
+                const float aspect = (float) renderer.getRenderTarget().extent.width / renderer.getRenderTarget().extent.height;
                 const Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
                 // const Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
                 const Matrix4 mvp = (proj * view * model).Transposed();

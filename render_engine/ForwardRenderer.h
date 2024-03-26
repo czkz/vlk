@@ -154,8 +154,7 @@ class ForwardRenderer {
 
     vk::SampleCountFlagBits sampleCount;
     vk::UniqueRenderPass renderPass;
-    // TODO rename FramebufferResources? / InternalResources
-    struct SwapchainResources {
+    struct FramebufferResources {
         ImageAttachment colorAttachment;
         ImageAttachment depthAttachment;
         std::vector<vk::UniqueFramebuffer> framebuffers;
@@ -190,12 +189,9 @@ private:
         LazyUpdate<vk::DescriptorSet> lastMaterialDescriptorSet;
 
     public:
-        CommandRecorder(
-            vk::CommandBuffer cmdBuffer,
-            vk::RenderPass renderPass,
-            vk::Framebuffer framebuffer,
-            vk::Extent2D imageExtent
-        ) : commandBuffer(cmdBuffer) {
+        explicit CommandRecorder(vk::CommandBuffer commandBuffer = nullptr) : commandBuffer(commandBuffer) {}
+
+        void start(vk::RenderPass renderPass, vk::Framebuffer framebuffer, vk::Extent2D imageExtent) {
             commandBuffer.begin({
                 .flags = {},
                 .pInheritanceInfo = nullptr,
@@ -263,7 +259,7 @@ private:
         }
     };
 
-    std::optional<CommandRecorder> commandRecorder;
+    CommandRecorder commandRecorder;
 
 private:
     void createRenderPass() {
@@ -419,18 +415,8 @@ public:
         }
         createSwapchainResources();
     }
-
-    void startFrame(Frame frame) {
-        commandRecorder = CommandRecorder {
-            frame.commandBuffer,
-            renderPass.get(),
-            swapchainResources.framebuffers[frame.imageIndex].get(),
-            renderTarget.extent,
-        };
-    }
-
-    void endFrame() {
-        commandRecorder.value().end();
+    const RenderTarget& getRenderTarget() const {
+        return renderTarget;
     }
 
 public:
@@ -457,8 +443,22 @@ public:
         });
     }
 
+    void startFrame(Frame frame) {
+        commandRecorder = CommandRecorder {frame.commandBuffer};
+        commandRecorder.start(
+            renderPass.get(),
+            swapchainResources.framebuffers[frame.imageIndex].get(),
+            renderTarget.extent
+        );
+    }
+
     void draw(const Mesh& mesh, const Material& material, const Matrix4& mvp) {
         const auto& registeredMaterial = registeredMaterials.at(material.descriptorSetLayout);
-        commandRecorder.value().draw(mesh, registeredMaterial.pipeline.get(), registeredMaterial.pipelineLayout.get(), material, mvp);
+        commandRecorder.draw(mesh, registeredMaterial.pipeline.get(), registeredMaterial.pipelineLayout.get(), material, mvp);
     }
+
+    void endFrame() {
+        commandRecorder.end();
+    }
+
 };
