@@ -1,6 +1,8 @@
 #pragma once
+#include <functional>
 #include <memory>
 #include "GraphicsContext.h"
+#include "utils.h"
 
 struct WindowSurface {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window = {nullptr, glfwDestroyWindow};
@@ -24,7 +26,6 @@ inline auto createWindowSurface(vk::Instance instance) {
     };
 };
 
-template <typename Renderer>
 class WindowRenderTarget {
 public: // TODO private
     const GraphicsContext* vlk;
@@ -186,66 +187,65 @@ private:
         }
     }
 
-    // TODO better name
-    void onWindowResized() {
+    void recreateSwapchain() {
         vlk->device->waitIdle();
         createSwapchain();
-        static_cast<Renderer*>(this)->notifyUpdateImageExtent(swapchain.info.imageExtent);
-        // TODO format change
+        if (onRecreateSwapchain) {
+            onRecreateSwapchain();
+        }
     }
 
-protected:
-    void init() {
-        createSwapchain();
-        createFramesInFlight();
-        static_cast<Renderer*>(this)->notifySetRenderTarget(
-            swapchain.info.imageExtent,
-            swapchain.info.imageFormat,
-            swapchain.imageViews
-        );
-    }
+    std::optional<Frame> activeFrame = std::nullopt;
+
+public:
 
 public:
     explicit WindowRenderTarget(const GraphicsContext* vlk, const WindowSurface* window)
-        : vlk(vlk), windowSurface(window) {}
+        : vlk(vlk), windowSurface(window)
+    {
+        createSwapchain();
+        createFramesInFlight();
+    }
 
-    struct ActiveFrameInfo {
-        uint32_t frameIndex;
-        uint32_t imageIndex;
-    };
-    std::optional<ActiveFrameInfo> activeFrameInfo = std::nullopt;
+    std::function<void()> onRecreateSwapchain;
+
+    RenderTarget renderTarget() const {
+        return {
+            .extent = swapchain.info.imageExtent,
+            .format = swapchain.info.imageFormat,
+            .imageViews = swapchain.imageViews,
+        };
+    }
 
     [[nodiscard]]
-    bool startFrame() {
+    std::optional<Frame> startFrame() {
         try {
             static_assert(maxFramesInFlight == 1);
             const uint32_t frameIndex = 0;
-            const auto& frameResources = framesInFlight[activeFrameInfo->frameIndex];
+            const auto& frameResources = framesInFlight[frameIndex];
             (void) vlk->device->waitForFences(frameResources.inFlightFence.get(), VK_TRUE, -1);
             const uint32_t imageIndex = vlk->device->acquireNextImageKHR(swapchain.swapchain.get(), -1, frameResources.imageAvailableSemaphore.get(), nullptr).value;
-            activeFrameInfo = ActiveFrameInfo {
-                .frameIndex = frameIndex,
-                .imageIndex = imageIndex,
-            };
             // vkAcquireNextImageKHR may return vk::Result::eSuboptimalKHR.
             // This is not an error, which means that
             // imageAvailableSemaphore was signaled,
             // so we can't return early without waiting on it
             vlk->device->resetFences(frameResources.inFlightFence.get());
-            static_cast<Renderer*>(this)->notifyStartFrame(frameResources.commandBuffer.get(), activeFrameInfo->imageIndex);
-            return true;
+            return activeFrame = Frame {
+                .commandBuffer = frameResources.commandBuffer.get(),
+                .frameIndex = frameIndex,
+                .imageIndex = imageIndex,
+            };
         } catch (const vk::OutOfDateKHRError& e) {
             // Can be thrown from vkAcquireNextImageKHR or vkQueuePresentKHR
-            onWindowResized();
+            recreateSwapchain();
         }
-        return false;
+        return std::nullopt;
     }
 
     void endFrame() {
-        assert(activeFrameInfo.has_value());
-        static_cast<Renderer*>(this)->notifyEndFrame();
+        assert(activeFrame.has_value());
         try {
-            const auto& frameResources = framesInFlight[activeFrameInfo->frameIndex];
+            const auto& frameResources = framesInFlight[activeFrame->frameIndex];
             vlk->graphicsQueue.submit(vk::SubmitInfo {
                 .waitSemaphoreCount = 1,
                 .pWaitSemaphores = &frameResources.imageAvailableSemaphore.get(),
@@ -260,16 +260,16 @@ public:
                 .pWaitSemaphores = &frameResources.renderFinishedSemaphore.get(),
                 .swapchainCount = 1,
                 .pSwapchains = &swapchain.swapchain.get(),
-                .pImageIndices = &activeFrameInfo->imageIndex,
+                .pImageIndices = &activeFrame->imageIndex,
                 .pResults = nullptr,
             });
             if (presentRes == vk::Result::eSuboptimalKHR) {
-                onWindowResized();
+                recreateSwapchain();
             }
         } catch (const vk::OutOfDateKHRError& e) {
             // Can be thrown from vkAcquireNextImageKHR or vkQueuePresentKHR
-            onWindowResized();
+            recreateSwapchain();
         }
-        activeFrameInfo = std::nullopt;
+        activeFrame = std::nullopt;
     }
 };

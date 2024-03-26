@@ -15,3 +15,14 @@ inline vk::UniquePipelineLayout createPipelineLayout(
     });
 }
 
+struct Frame {
+    vk::CommandBuffer commandBuffer;
+    uint32_t frameIndex;
+    uint32_t imageIndex;
+};
+
+struct RenderTarget {
+    vk::Extent2D extent;
+    vk::Format format;
+    std::span<const vk::ImageView> imageViews;
+};

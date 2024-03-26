@@ -22,7 +22,10 @@ int main() {
     const GraphicsContext graphicsContext = makeGraphicsContext(instance.get(), window.surface.get());
     const GraphicsContext* vlk = &graphicsContext;
     AssetPool assets;
-    ForwardRenderer renderer (vlk, &window);
+    WindowRenderTarget renderTarget (vlk, &window);
+    ForwardRenderer renderer (vlk);
+    renderer.setRenderTarget(renderTarget.renderTarget());
+    renderTarget.onRecreateSwapchain = [&]() { renderer.updateRenderTarget(renderTarget.renderTarget()); };
 
     const auto unlitMaterial = makeMaterialType(vlk, unlitMaterialBindings);
 
@@ -47,17 +50,19 @@ int main() {
     };
 
     const auto drawFrame = [&]() {
-        if (renderer.startFrame()) {
+        if (const auto frame = renderTarget.startFrame()) {
+            renderer.startFrame(*frame);
             for (const auto& transform : cubes) {
                 const Matrix4 model = transform.Matrix();
                 const Matrix4 view = Transform::z_convert * camera.Matrix().Inverse();
-                const float aspect = (float) renderer.swapchain.info.imageExtent.width / renderer.swapchain.info.imageExtent.height;
+                const float aspect = (float) renderTarget.swapchain.info.imageExtent.width / renderTarget.swapchain.info.imageExtent.height;
                 const Matrix4 proj = Transform::PerspectiveProjection(90, aspect, {0.1, 500}) * Transform::y_flip;
                 // const Matrix4 proj = Transform::OrthgraphicProjection(2, aspect, {0.1, 10}) * Transform::y_flip;
                 const Matrix4 mvp = (proj * view * model).Transposed();
                 renderer.draw(cubeMesh, bricksUnlitMaterial, mvp);
             }
             renderer.endFrame();
+            renderTarget.endFrame();
         }
     };
 

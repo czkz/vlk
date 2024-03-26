@@ -1,7 +1,8 @@
 #pragma once
+#include "Matrix.h"
 #include "vlk/GraphicsContext.h"
 #include "vlk/ImageAttachment.h"
-#include "vlk/WindowRenderTarget.h"
+#include "vlk/utils.h"
 #include "vlk/utils.h"
 #include "Mesh.h"
 #include "Material.h"
@@ -146,11 +147,10 @@ inline vk::UniquePipeline makeGraphicsPipeline(
     return vlk->device->createGraphicsPipelineUnique(nullptr, pipelineInfo).value;
 }
 
-class ForwardRenderer : public WindowRenderTarget<ForwardRenderer> {
+class ForwardRenderer {
+    const GraphicsContext* vlk;
 
-    vk::Extent2D currentImageExtent;
-    vk::Format currentImageFormat;
-    std::span<const vk::ImageView> currentImageViews;
+    RenderTarget renderTarget;
 
     vk::SampleCountFlagBits sampleCount;
     vk::UniqueRenderPass renderPass;
@@ -269,7 +269,7 @@ private:
     void createRenderPass() {
         vk::AttachmentDescription colorAttachmentDesc = {
             .flags = {},
-            .format = currentImageFormat,
+            .format = renderTarget.format,
             .samples = sampleCount,
             .loadOp = vk::AttachmentLoadOp::eClear,
             .storeOp = vk::AttachmentStoreOp::eDontCare,
@@ -291,7 +291,7 @@ private:
         };
         vk::AttachmentDescription colorResolveDesc = {
             .flags = {},
-            .format = currentImageFormat,
+            .format = renderTarget.format,
             .samples = vk::SampleCountFlagBits::e1,
             .loadOp = vk::AttachmentLoadOp::eDontCare,
             .storeOp = vk::AttachmentStoreOp::eStore,
@@ -352,10 +352,10 @@ private:
         swapchainResources.colorAttachment = makeImageAttachment(vlk, {
             .flags = {},
             .imageType = vk::ImageType::e2D,
-            .format = currentImageFormat,
+            .format = renderTarget.format,
             .extent = {
-                currentImageExtent.width,
-                currentImageExtent.height,
+                renderTarget.extent.width,
+                renderTarget.extent.height,
                 1
             },
             .mipLevels = 1,
@@ -373,8 +373,8 @@ private:
             .imageType = vk::ImageType::e2D,
             .format = vk::Format::eD32Sfloat,
             .extent = {
-                .width = currentImageExtent.width,
-                .height = currentImageExtent.height,
+                .width = renderTarget.extent.width,
+                .height = renderTarget.extent.height,
                 .depth = 1,
             },
             .mipLevels = 1,
@@ -388,7 +388,7 @@ private:
             .initialLayout = vk::ImageLayout::eUndefined,
         }, vk::MemoryPropertyFlagBits::eDeviceLocal, vk::ImageAspectFlagBits::eDepth);
         swapchainResources.framebuffers.clear();
-        for (const auto& resolveImageView : currentImageViews) {
+        for (const auto& resolveImageView : renderTarget.imageViews) {
             const auto attachments = std::to_array({
                 swapchainResources.colorAttachment.imageView.get(),
                 swapchainResources.depthAttachment.imageView.get(),
@@ -399,54 +399,43 @@ private:
                 .renderPass = renderPass.get(),
                 .attachmentCount = attachments.size(),
                 .pAttachments = attachments.data(),
-                .width = currentImageExtent.width,
-                .height = currentImageExtent.height,
+                .width = renderTarget.extent.width,
+                .height = renderTarget.extent.height,
                 .layers = 1,
             }));
         }
     }
 
-protected:
-    friend WindowRenderTarget;
-    void notifySetRenderTarget(
-        vk::Extent2D extent,
-        vk::Format format,
-        std::span<const vk::ImageView> imageViews
-    ) {
-        currentImageExtent = extent;
-        currentImageFormat = format;
-        currentImageViews = imageViews;
+public:
+    void setRenderTarget(RenderTarget newRenderTarget) {
+        renderTarget = std::move(newRenderTarget);
         createRenderPass();
         createSwapchainResources();
     }
-    void notifyUpdateImageExtent(vk::Extent2D extent) {
-        currentImageExtent = extent;
-        createSwapchainResources();
-    }
-    void notifyUpdateImageFormat(vk::Format format) {
-        currentImageFormat = format;
-        createRenderPass();
+    void updateRenderTarget(RenderTarget newRenderTarget) {
+        const auto old = std::exchange(renderTarget, newRenderTarget);
+        if (old.format != renderTarget.format) {
+            createRenderPass();
+        }
         createSwapchainResources();
     }
 
-    void notifyStartFrame(vk::CommandBuffer commandBuffer, size_t imageIndex) {
+    void startFrame(Frame frame) {
         commandRecorder = CommandRecorder {
-            commandBuffer,
+            frame.commandBuffer,
             renderPass.get(),
-            swapchainResources.framebuffers[imageIndex].get(),
-            currentImageExtent,
+            swapchainResources.framebuffers[frame.imageIndex].get(),
+            renderTarget.extent,
         };
     }
 
-    void notifyEndFrame() {
+    void endFrame() {
         commandRecorder.value().end();
     }
 
 public:
-    explicit ForwardRenderer(const GraphicsContext* vlk, const WindowSurface* window) : WindowRenderTarget(vlk, window) {
+    explicit ForwardRenderer(const GraphicsContext* vlk) : vlk(vlk) {
         sampleCount = vlk->props.maxSampleCount;
-        // TODO this is ugly
-        init();
     }
 
     void registerMaterialType(vk::DescriptorSetLayout descriptorSetLayout) {
