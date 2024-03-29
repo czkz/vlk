@@ -28,8 +28,8 @@ int main() {
     renderTarget.onRecreateSwapchain = [&]() { renderer.updateRenderTarget(renderTarget.renderTarget()); };
 
     const auto unlitMaterial = makeMaterialType(vlk, unlitMaterialBindings);
-
     renderer.registerMaterialType(unlitMaterial.descriptorPool.descriptorSetLayout.get());
+
     const auto bricksTexture = makeTexture(vlk, assets, "textures/bricks.png", vk::Format::eR8G8B8A8Srgb);
     const auto bricksUnlitMaterial = unlitMaterial.makeMaterial(std::span(&bricksTexture, 1));
 
@@ -49,7 +49,9 @@ int main() {
         .rotation = Quaternion::Euler(0, 0, std::numbers::pi),
     };
 
-    const auto drawFrame = [&]() {
+    FrameCounter frameCounter;
+    while (!glfwWindowShouldClose(window.window.get())) {
+        glfwPollEvents();
         if (const auto frame = renderTarget.startFrame()) {
             renderer.startFrame(*frame);
             for (const auto& transform : cubes) {
@@ -64,34 +66,12 @@ int main() {
             renderer.endFrame();
             renderTarget.endFrame();
         }
-    };
-
-
-    const auto runWindowLoop = [](GLFWwindow* window, auto&& drawFrame) {
-        FrameCounter frameCounter;
-        while (!glfwWindowShouldClose(window)) {
-            glfwPollEvents();
-            drawFrame();
-            frameCounter.tick();
-            if (frameCounter.frameCount() == 0) {
-                prn_raw(frameCounter.frameTimeTotal(), " s total, ", frameCounter.frameTimeAvg(), " ms avg (", frameCounter.fpsAvg(), " fps)");
-                break;
-            }
-            // if (true) { // TODO test on wayland, maybe remove
-            //     int w, h;
-            //     glfwGetFramebufferSize(window, &w, &h);
-            //     if (w == 0 || h == 0) {
-            //         prn("Window is minimized, waiting...");
-            //         while (w == 0 || h == 0) {
-            //             glfwWaitEvents();
-            //             glfwGetFramebufferSize(window, &w, &h);
-            //         }
-            //     }
-            // }
+        frameCounter.tick();
+        if (frameCounter.frameCount() == 0) {
+            prn_raw(frameCounter.frameTimeTotal(), " s total, ", frameCounter.frameTimeAvg(), " ms avg (", frameCounter.fpsAvg(), " fps)");
+            break;
         }
-    };
-
-    runWindowLoop(window.window.get(), drawFrame);
+    }
     vlk->device->waitIdle();
 }
 
